@@ -1,9 +1,9 @@
 [package]
-name = "google-scholar-rss-feed"
-description = "Generates a single RSS feed of recent scientific publications for one or more authors, sorted by date. Parses data from OpenAlex."
-repository = "https://github.com/Julien-cpsn/google-scholar-rss-feed"
-documentation = "https://github.com/Julien-cpsn/google-scholar-rss-feed"
-authors = ["Julien-cpsn"]
+name = "scholarly-rss-feed"
+description = "Generates RSS feeds of recent scientific publications using OpenAlex."
+repository = "https://github.com/Michaelmvh/scholarly-rss-feed"
+documentation = "https://github.com/Michaelmvh/scholarly-rss-feed"
+authors = ["Michaelmvh", "Julien-cpsn"]
 license = "MIT"
 categories = ["science"]
 version = "0.1.7"

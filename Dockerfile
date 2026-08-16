@@ -20,7 +20,7 @@ WORKDIR /app
 
 # TLS trust for HTTPS calls to the OpenAlex API is provided by rustls' bundled
 # Mozilla roots, so no ca-certificates package is required.
-COPY --from=builder /app/target/release/google-scholar-rss-feed /usr/local/bin/google-scholar-rss-feed
+COPY --from=builder /app/target/release/scholarly-rss-feed /usr/local/bin/scholarly-rss-feed
 
 # Bake the feed definitions into the image so the repo is the single source of
 # truth: edit feeds.toml, push, and the NAS just pulls the updated image. A host
@@ -33,4 +33,4 @@ EXPOSE 3005
 ENV GSRF_CONFIG=/config/feeds.toml
 
 # Bind to all interfaces so the feed is reachable outside the container.
-CMD ["google-scholar-rss-feed", "0.0.0.0:3005"]
+CMD ["scholarly-rss-feed", "0.0.0.0:3005"]

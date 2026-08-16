@@ -8,13 +8,18 @@ required).
 Feeds can be defined in a config file so a feed URL never has to change, which makes this
 convenient to drop into a display such as a [TRMNL](https://usetrmnl.com) via its RSS plugin.
 
+This project was originally based on
+[Julien-cpsn/google-scholar-rss-feed](https://github.com/Julien-cpsn/google-scholar-rss-feed)
+and has since been redesigned around OpenAlex. The original copyright and MIT license notice
+are retained in [`LICENSE`](./LICENSE).
+
 ## Deployment overview
 
 The repository and published container are available at:
 
-- **Source:** <https://github.com/Michaelmvh/google-scholar-rss-feed>
-- **Container:** <https://github.com/Michaelmvh/google-scholar-rss-feed/pkgs/container/google-scholar-rss-feed>
-- **Image:** `ghcr.io/michaelmvh/google-scholar-rss-feed:latest`
+- **Source:** <https://github.com/Michaelmvh/scholarly-rss-feed>
+- **Container:** <https://github.com/Michaelmvh/scholarly-rss-feed/pkgs/container/scholarly-rss-feed>
+- **Image:** `ghcr.io/michaelmvh/scholarly-rss-feed:latest`
 
 The production update path is:
 
@@ -218,7 +223,7 @@ before expecting the NAS to find a new image.
 
 For anonymous NAS pulls, set the package to public once:
 
-**GitHub profile → Packages → google-scholar-rss-feed → Package settings → Change visibility
+**GitHub profile → Packages → scholarly-rss-feed → Package settings → Change visibility
 → Public**
 
 To keep it private instead, authenticate the NAS using a GitHub personal access token with
@@ -339,7 +344,7 @@ Every successful workflow build publishes an immutable `sha-...` image tag. To r
 2. Change the NAS Compose image temporarily:
 
    ```yaml
-   image: ghcr.io/michaelmvh/google-scholar-rss-feed:sha-abcdef0
+   image: ghcr.io/michaelmvh/scholarly-rss-feed:sha-abcdef0
    ```
 
 3. Pull and recreate the project.

@@ -1,7 +1,7 @@
 services:
   scholar-rss:
     # Prebuilt image published by the GitHub Actions workflow.
-    image: ghcr.io/michaelmvh/google-scholar-rss-feed:latest
+    image: ghcr.io/michaelmvh/scholarly-rss-feed:latest
     # Build from the repository root for local development.
     build: ..
     container_name: scholar-rss

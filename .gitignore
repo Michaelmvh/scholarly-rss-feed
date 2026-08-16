@@ -1,6 +1,7 @@
 /target
 
 /.idea
+.DS_Store
 
 # Cloudflare Tunnel token (docker-compose.nas.yml) — never commit secrets.
 .env

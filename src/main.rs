@@ -33,7 +33,7 @@ lazy_static! {
     pub static ref RSS_CHANNELS: Arc<RwLock<HashMap<FeedRequest, Channel>>> =
         Arc::new(RwLock::new(HashMap::new()));
     pub static ref CLIENT: reqwest::Client = reqwest::Client::builder()
-        .user_agent("google-scholar-rss-feed")
+        .user_agent("scholarly-rss-feed")
         .build()
         .expect("failed to build HTTP client");
 }
@@ -471,7 +471,7 @@ async fn build_channel(request: &FeedRequest) -> Channel {
         .link(String::from("https://openalex.org"))
         .description(description)
         .language(String::from("en-US"))
-        .generator(String::from("google-scholar-rss-feed"))
+        .generator(String::from("scholarly-rss-feed"))
         .ttl(String::from("60"))
         .docs(String::from("https://cyber.harvard.edu/rss/rss.html"))
         .text_input(TextInput {
