@@ -1,4 +1,5 @@
 mod config;
+mod google_scholar;
 mod openalex;
 mod reader;
 
@@ -33,8 +34,11 @@ use tokio::time::Instant;
 lazy_static! {
     static ref RSS_CHANNELS: Arc<RwLock<HashMap<FeedRequest, GeneratedFeed>>> =
         Arc::new(RwLock::new(HashMap::new()));
+    static ref FEED_BUILDS: FeedBuilds = Arc::new(RwLock::new(HashMap::new()));
     pub static ref CLIENT: reqwest::Client = reqwest::Client::builder()
         .user_agent("scholarly-rss-feed")
+        .connect_timeout(StdDuration::from_secs(10))
+        .timeout(StdDuration::from_secs(30))
         .build()
         .expect("failed to build HTTP client");
 }
@@ -43,31 +47,96 @@ static CONFIG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 const DEFAULT_FROM_DAYS: u32 = 365;
 
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
+enum Provider {
+    OpenAlex,
+    GoogleScholar,
+}
+
+#[derive(Debug)]
+enum ResolveFeedError {
+    InvalidRequest(String),
+    Provider(String),
+}
+
+impl Provider {
+    fn configured() -> Result<Self, String> {
+        Self::parse(&env::var("GSRF_PROVIDER").unwrap_or_else(|_| "openalex".to_string()))
+    }
+
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "openalex" => Ok(Self::OpenAlex),
+            "google-scholar" | "google_scholar" | "scholar" => Ok(Self::GoogleScholar),
+            other => Err(format!(
+                "Unknown GSRF_PROVIDER \"{other}\"; expected \"openalex\" or \"google-scholar\"."
+            )),
+        }
+    }
+
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::OpenAlex => "OpenAlex",
+            Self::GoogleScholar => "Google Scholar",
+        }
+    }
+
+    fn site_url(self) -> &'static str {
+        match self {
+            Self::OpenAlex => "https://openalex.org",
+            Self::GoogleScholar => "https://scholar.google.com",
+        }
+    }
+
+    fn search_url(self) -> &'static str {
+        match self {
+            Self::OpenAlex => "https://openalex.org/works",
+            Self::GoogleScholar => "https://scholar.google.com/scholar",
+        }
+    }
+}
+
 #[derive(Clone)]
 struct GeneratedFeed {
     channel: Channel,
     reader: reader::Feed,
 }
 
+type FeedCacheKey = (
+    Provider,
+    Vec<String>,
+    Vec<String>,
+    Vec<String>,
+    String,
+    Vec<String>,
+);
+type FeedBuild = Arc<tokio::sync::OnceCell<Result<GeneratedFeed, String>>>;
+type FeedBuilds = Arc<RwLock<HashMap<FeedCacheKey, FeedBuild>>>;
+
 /// Fully-resolved description of a feed, used as the cache key.
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
-pub struct FeedRequest {
+struct FeedRequest {
+    provider: Provider,
     /// Normalized, deduped, sorted OpenAlex author ids.
-    pub author_ids: Vec<String>,
+    author_ids: Vec<String>,
+    /// Author names queried by the archived Google Scholar provider.
+    google_scholar_authors: Vec<String>,
     /// Normalized, deduped, sorted OpenAlex source (journal) ids.
-    pub source_ids: Vec<String>,
+    source_ids: Vec<String>,
     /// Earliest publication date (YYYY-MM-DD).
-    pub from: String,
+    from: String,
     /// Sorted OpenAlex topic ids.
-    pub topics: Vec<String>,
+    topics: Vec<String>,
     /// Optional channel title carried alongside (not part of identity below).
-    pub title: Option<String>,
+    title: Option<String>,
 }
 
 impl FeedRequest {
-    fn cache_key(&self) -> (Vec<String>, Vec<String>, String, Vec<String>) {
+    fn cache_key(&self) -> FeedCacheKey {
         (
+            self.provider,
             self.author_ids.clone(),
+            self.google_scholar_authors.clone(),
             self.source_ids.clone(),
             self.from.clone(),
             self.topics.clone(),
@@ -93,6 +162,9 @@ async fn main() {
         if last_update.elapsed() >= StdDuration::from_secs(3600) {
             println!("Clearing cache");
             RSS_CHANNELS.write().clear();
+            FEED_BUILDS
+                .write()
+                .retain(|_, build| Arc::strong_count(build) > 1);
             last_update = Instant::now();
         }
 
@@ -151,8 +223,17 @@ async fn serve_feed(request: Request<Incoming>) -> Result<Response<Full<Bytes>>,
         .unwrap_or_default();
 
     let config = Config::load(config_path());
+    let provider = match Provider::configured() {
+        Ok(provider) => provider,
+        Err(message) => {
+            return Response::builder()
+                .header("Content-Type", "text/plain; charset=utf-8")
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Full::new(Bytes::from(message)));
+        }
+    };
 
-    let feed_request = match resolve_feed_request(&params, &config).await {
+    let feed_request = match resolve_feed_request(&params, &config, provider).await {
         Ok(Some(fr)) => fr,
         Ok(None) => {
             return Response::builder()
@@ -164,15 +245,31 @@ async fn serve_feed(request: Request<Incoming>) -> Result<Response<Full<Bytes>>,
                      the config file and use ?feed=<name>.",
                 )));
         }
-        Err(message) => {
+        Err(ResolveFeedError::InvalidRequest(message)) => {
             return Response::builder()
                 .header("Access-Control-Allow-Origin", "*")
                 .status(StatusCode::BAD_REQUEST)
                 .body(Full::new(Bytes::from(message)));
         }
+        Err(ResolveFeedError::Provider(message)) => {
+            eprintln!("{message}");
+            return Response::builder()
+                .header("Content-Type", "text/plain; charset=utf-8")
+                .status(StatusCode::BAD_GATEWAY)
+                .body(Full::new(Bytes::from(message)));
+        }
     };
 
-    let feed = generate_feed_if_needed(feed_request).await;
+    let feed = match generate_feed_if_needed(feed_request).await {
+        Ok(feed) => feed,
+        Err(message) => {
+            eprintln!("{message}");
+            return Response::builder()
+                .header("Content-Type", "text/plain; charset=utf-8")
+                .status(StatusCode::BAD_GATEWAY)
+                .body(Full::new(Bytes::from(message)));
+        }
+    };
     let (status, content_type, body) = if has_param(&params, "rss") {
         (
             StatusCode::OK,
@@ -237,15 +334,16 @@ fn has_param(params: &[(String, String)], key: &str) -> bool {
     params.iter().any(|(name, _)| name == key)
 }
 
-/// Merge a named feed (if any) with ad-hoc URL params, resolve every identifier to an
-/// OpenAlex author id, and build the cache key. Returns:
-/// - `Ok(Some(req))` when at least one author resolved,
-/// - `Ok(None)` when no authors were specified at all,
+/// Merge a named feed (if any) with provider-compatible ad-hoc URL params and
+/// build the cache key. Returns:
+/// - `Ok(Some(req))` when the provider has enough identifiers,
+/// - `Ok(None)` when no identifiers were specified at all,
 /// - `Err(msg)` when a named feed was requested but not found.
 async fn resolve_feed_request(
     params: &[(String, String)],
     config: &Config,
-) -> Result<Option<FeedRequest>, String> {
+    provider: Provider,
+) -> Result<Option<FeedRequest>, ResolveFeedError> {
     let feed_name = first_param(params, "feed");
 
     // Ad-hoc params.
@@ -270,7 +368,11 @@ async fn resolve_feed_request(
     let feed: Option<&FeedConfig> = match &feed_name {
         Some(name) => match config.feeds.get(name) {
             Some(f) => Some(f),
-            None => return Err(format!("Unknown feed \"{name}\".")),
+            None => {
+                return Err(ResolveFeedError::InvalidRequest(format!(
+                    "Unknown feed \"{name}\"."
+                )))
+            }
         },
         None => {
             if has_adhoc {
@@ -281,7 +383,9 @@ async fn resolve_feed_request(
                     Some(name) => match config.feeds.get(name) {
                         Some(f) => Some(f),
                         None => {
-                            return Err(format!("Configured default_feed \"{name}\" not found."))
+                            return Err(ResolveFeedError::InvalidRequest(format!(
+                                "Configured default_feed \"{name}\" not found."
+                            )))
                         }
                     },
                     None => return Ok(None),
@@ -292,22 +396,76 @@ async fn resolve_feed_request(
 
     let empty = FeedConfig::default();
     let feed = feed.unwrap_or(&empty);
+    let from = adhoc_from
+        .or_else(|| feed.from.clone())
+        .unwrap_or_else(|| default_from_date(config.settings.from_days));
+
+    if provider == Provider::GoogleScholar {
+        let mut google_scholar_authors = feed
+            .people
+            .iter()
+            .map(|person| {
+                person
+                    .google_scholar_name
+                    .as_deref()
+                    .unwrap_or(&person.name)
+            })
+            .chain(feed.google_scholar_authors.iter().map(String::as_str))
+            .chain(feed.authors.iter().map(String::as_str))
+            .chain(adhoc_authors.iter().map(String::as_str))
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .collect::<Vec<_>>();
+        google_scholar_authors.sort();
+        google_scholar_authors.dedup();
+
+        if google_scholar_authors.is_empty() {
+            return Err(ResolveFeedError::InvalidRequest(
+                "The Google Scholar provider requires at least one \
+                 people entry, legacy google_scholar_authors entry, or ?author= parameter."
+                    .to_string(),
+            ));
+        }
+
+        return Ok(Some(FeedRequest {
+            provider,
+            author_ids: Vec::new(),
+            google_scholar_authors,
+            source_ids: Vec::new(),
+            from,
+            topics: Vec::new(),
+            title: feed.title.clone(),
+        }));
+    }
 
     // Gather author identifiers from feed config + ad-hoc params.
     let mut author_ids: Vec<String> = Vec::new();
+    for id in feed
+        .people
+        .iter()
+        .filter_map(|person| person.openalex_id.as_deref())
+    {
+        author_ids.push(normalize_id(id));
+    }
     for id in feed.author_ids.iter().chain(adhoc_author_ids.iter()) {
         author_ids.push(normalize_id(id));
     }
 
     for orcid in feed.orcids.iter().chain(adhoc_orcids.iter()) {
-        match resolve_orcid(orcid).await {
+        match resolve_orcid(orcid)
+            .await
+            .map_err(ResolveFeedError::Provider)?
+        {
             Some(id) => author_ids.push(id),
             None => eprintln!("Could not resolve ORCID \"{orcid}\""),
         }
     }
 
     for name in feed.authors.iter().chain(adhoc_authors.iter()) {
-        match resolve_author_name(name).await {
+        match resolve_author_name(name)
+            .await
+            .map_err(ResolveFeedError::Provider)?
+        {
             Some((id, display)) => {
                 println!("Resolved author \"{name}\" -> {id} ({display})");
                 author_ids.push(id);
@@ -327,14 +485,20 @@ async fn resolve_feed_request(
     }
 
     for issn in feed.issns.iter().chain(adhoc_issns.iter()) {
-        match resolve_issn(issn).await {
+        match resolve_issn(issn)
+            .await
+            .map_err(ResolveFeedError::Provider)?
+        {
             Some(id) => source_ids.push(id),
             None => eprintln!("Could not resolve ISSN \"{issn}\""),
         }
     }
 
     for name in feed.journals.iter().chain(adhoc_journals.iter()) {
-        match resolve_journal_name(name).await {
+        match resolve_journal_name(name)
+            .await
+            .map_err(ResolveFeedError::Provider)?
+        {
             Some((id, display)) => {
                 println!("Resolved journal \"{name}\" -> {id} ({display})");
                 source_ids.push(id);
@@ -361,13 +525,10 @@ async fn resolve_feed_request(
     topics.sort();
     topics.dedup();
 
-    // Recency window: ad-hoc `from` > feed `from` > settings.from_days > default.
-    let from = adhoc_from
-        .or_else(|| feed.from.clone())
-        .unwrap_or_else(|| default_from_date(config.settings.from_days));
-
     Ok(Some(FeedRequest {
+        provider,
         author_ids,
+        google_scholar_authors: Vec::new(),
         source_ids,
         from,
         topics,
@@ -390,26 +551,36 @@ fn mailto() -> Option<String> {
 }
 
 /// Resolve an ORCID to a bare OpenAlex author id.
-async fn resolve_orcid(orcid: &str) -> Option<String> {
+async fn resolve_orcid(orcid: &str) -> Result<Option<String>, String> {
     let orcid = orcid.trim();
     let orcid = orcid.rsplit('/').next().unwrap_or(orcid);
-    let mut url = url::Url::parse(&format!("{API_BASE}/authors/https://orcid.org/{orcid}")).ok()?;
+    let mut url = url::Url::parse(&format!("{API_BASE}/authors/https://orcid.org/{orcid}"))
+        .map_err(|error| format!("Failed to build OpenAlex ORCID URL: {error}"))?;
     if let Some(m) = mailto() {
         url.query_pairs_mut().append_pair("mailto", &m);
     }
-    let author = CLIENT
+    let response = CLIENT
         .get(url)
         .send()
         .await
-        .ok()?
+        .map_err(|error| format!("OpenAlex ORCID lookup failed: {error}"))?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let author = response
+        .error_for_status()
+        .map_err(|error| format!("OpenAlex ORCID lookup failed: {error}"))?
         .json::<Author>()
         .await
-        .ok()?;
-    Some(normalize_id(&author.id?))
+        .map_err(|error| format!("Failed to parse OpenAlex ORCID response: {error}"))?;
+    let id = author
+        .id
+        .ok_or_else(|| "OpenAlex ORCID response did not contain an author ID".to_string())?;
+    Ok(Some(normalize_id(&id)))
 }
 
 /// Resolve an author display name (best match) to (id, display_name).
-async fn resolve_author_name(name: &str) -> Option<(String, String)> {
+async fn resolve_author_name(name: &str) -> Result<Option<(String, String)>, String> {
     let mut pairs = vec![
         ("search".to_string(), name.to_string()),
         ("per_page".to_string(), "1".to_string()),
@@ -417,41 +588,60 @@ async fn resolve_author_name(name: &str) -> Option<(String, String)> {
     if let Some(m) = mailto() {
         pairs.push(("mailto".to_string(), m));
     }
-    let url = url::Url::parse_with_params(&format!("{API_BASE}/authors"), &pairs).ok()?;
+    let url = url::Url::parse_with_params(&format!("{API_BASE}/authors"), &pairs)
+        .map_err(|error| format!("Failed to build OpenAlex author search URL: {error}"))?;
     let response = CLIENT
         .get(url)
         .send()
         .await
-        .ok()?
+        .map_err(|error| format!("OpenAlex author search failed: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("OpenAlex author search failed: {error}"))?
         .json::<AuthorsResponse>()
         .await
-        .ok()?;
-    let author = response.results.into_iter().next()?;
-    let id = normalize_id(&author.id?);
+        .map_err(|error| format!("Failed to parse OpenAlex author search response: {error}"))?;
+    let Some(author) = response.results.into_iter().next() else {
+        return Ok(None);
+    };
+    let id = normalize_id(
+        &author
+            .id
+            .ok_or_else(|| "OpenAlex author search result did not contain an ID".to_string())?,
+    );
     let display = author.display_name.unwrap_or_else(|| id.clone());
-    Some((id, display))
+    Ok(Some((id, display)))
 }
 
 /// Resolve an ISSN to a bare OpenAlex source id.
-async fn resolve_issn(issn: &str) -> Option<String> {
+async fn resolve_issn(issn: &str) -> Result<Option<String>, String> {
     let issn = issn.trim();
-    let mut url = url::Url::parse(&format!("{API_BASE}/sources/issn:{issn}")).ok()?;
+    let mut url = url::Url::parse(&format!("{API_BASE}/sources/issn:{issn}"))
+        .map_err(|error| format!("Failed to build OpenAlex ISSN URL: {error}"))?;
     if let Some(m) = mailto() {
         url.query_pairs_mut().append_pair("mailto", &m);
     }
-    let source = CLIENT
+    let response = CLIENT
         .get(url)
         .send()
         .await
-        .ok()?
+        .map_err(|error| format!("OpenAlex ISSN lookup failed: {error}"))?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let source = response
+        .error_for_status()
+        .map_err(|error| format!("OpenAlex ISSN lookup failed: {error}"))?
         .json::<SourceRecord>()
         .await
-        .ok()?;
-    Some(normalize_id(&source.id?))
+        .map_err(|error| format!("Failed to parse OpenAlex ISSN response: {error}"))?;
+    let id = source
+        .id
+        .ok_or_else(|| "OpenAlex ISSN response did not contain a source ID".to_string())?;
+    Ok(Some(normalize_id(&id)))
 }
 
 /// Resolve a journal display name (best match) to (id, display_name).
-async fn resolve_journal_name(name: &str) -> Option<(String, String)> {
+async fn resolve_journal_name(name: &str) -> Result<Option<(String, String)>, String> {
     let mut pairs = vec![
         ("search".to_string(), name.to_string()),
         ("per_page".to_string(), "1".to_string()),
@@ -459,33 +649,60 @@ async fn resolve_journal_name(name: &str) -> Option<(String, String)> {
     if let Some(m) = mailto() {
         pairs.push(("mailto".to_string(), m));
     }
-    let url = url::Url::parse_with_params(&format!("{API_BASE}/sources"), &pairs).ok()?;
+    let url = url::Url::parse_with_params(&format!("{API_BASE}/sources"), &pairs)
+        .map_err(|error| format!("Failed to build OpenAlex journal search URL: {error}"))?;
     let response = CLIENT
         .get(url)
         .send()
         .await
-        .ok()?
+        .map_err(|error| format!("OpenAlex journal search failed: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("OpenAlex journal search failed: {error}"))?
         .json::<SourcesResponse>()
         .await
-        .ok()?;
-    let source = response.results.into_iter().next()?;
-    let id = normalize_id(&source.id?);
+        .map_err(|error| format!("Failed to parse OpenAlex journal search response: {error}"))?;
+    let Some(source) = response.results.into_iter().next() else {
+        return Ok(None);
+    };
+    let id = normalize_id(
+        &source
+            .id
+            .ok_or_else(|| "OpenAlex journal search result did not contain an ID".to_string())?,
+    );
     let display = source.display_name.unwrap_or_else(|| id.clone());
-    Some((id, display))
+    Ok(Some((id, display)))
 }
 
-async fn generate_feed_if_needed(request: FeedRequest) -> GeneratedFeed {
+async fn generate_feed_if_needed(request: FeedRequest) -> Result<GeneratedFeed, String> {
     let key = request.cache_key();
     if let Some(feed) = find_cached(&key) {
-        return feed;
+        return Ok(feed);
     }
 
-    let feed = build_feed(&request).await;
-    RSS_CHANNELS.write().insert(request, feed.clone());
-    feed
+    let build = FEED_BUILDS
+        .write()
+        .entry(key.clone())
+        .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
+        .clone();
+    let result = build
+        .get_or_init(|| async { build_feed(&request).await })
+        .await
+        .clone();
+    if let Ok(feed) = &result {
+        RSS_CHANNELS.write().insert(request, feed.clone());
+    }
+    let mut builds = FEED_BUILDS.write();
+    if builds
+        .get(&key)
+        .is_some_and(|current| Arc::ptr_eq(current, &build))
+    {
+        builds.remove(&key);
+    }
+
+    result
 }
 
-fn find_cached(key: &(Vec<String>, Vec<String>, String, Vec<String>)) -> Option<GeneratedFeed> {
+fn find_cached(key: &FeedCacheKey) -> Option<GeneratedFeed> {
     let channels = RSS_CHANNELS.read();
     channels
         .iter()
@@ -493,7 +710,7 @@ fn find_cached(key: &(Vec<String>, Vec<String>, String, Vec<String>)) -> Option<
         .map(|(_, feed)| feed.clone())
 }
 
-async fn build_feed(request: &FeedRequest) -> GeneratedFeed {
+async fn build_feed(request: &FeedRequest) -> Result<GeneratedFeed, String> {
     println!(
         "Building RSS channel for authors [{}] journals [{}] from {}",
         request.author_ids.join(", "),
@@ -502,25 +719,26 @@ async fn build_feed(request: &FeedRequest) -> GeneratedFeed {
     );
 
     let (title, description) = channel_metadata(request);
+    let provider_name = request.provider.display_name();
 
     let mut channel = ChannelBuilder::default()
         .title(title.clone())
-        .link(String::from("https://openalex.org"))
+        .link(request.provider.site_url())
         .description(description.clone())
         .language(String::from("en-US"))
         .generator(String::from("scholarly-rss-feed"))
         .ttl(String::from("60"))
         .docs(String::from("https://cyber.harvard.edu/rss/rss.html"))
         .text_input(TextInput {
-            title: String::from("OpenAlex"),
-            description: String::from("Search OpenAlex"),
+            title: provider_name.to_string(),
+            description: format!("Search {provider_name}"),
             name: String::from("q"),
-            link: String::from("https://openalex.org/works"),
+            link: request.provider.search_url().to_string(),
         })
         .categories(vec![Category::from("Scientific Research")])
         .build();
 
-    let works = fetch_works(request).await;
+    let works = fetch_works(request).await?;
     let items = works.iter().map(work_to_item).collect::<Vec<_>>();
     channel.set_items(items);
 
@@ -530,24 +748,28 @@ async fn build_feed(request: &FeedRequest) -> GeneratedFeed {
 
     let publications = works.iter().map(work_to_publication).collect();
 
-    GeneratedFeed {
+    Ok(GeneratedFeed {
         channel,
         reader: reader::Feed {
             title,
             description,
             publications,
         },
-    }
+    })
 }
 
 fn channel_metadata(request: &FeedRequest) -> (String, String) {
+    let provider_name = request.provider.display_name();
     if let Some(title) = &request.title {
         return (
             title.clone(),
-            format!("{title}. Recent publications parsed from OpenAlex."),
+            format!("{title}. Recent publications parsed from {provider_name}."),
         );
     }
-    let authors = request.author_ids.len();
+    let authors = match request.provider {
+        Provider::OpenAlex => request.author_ids.len(),
+        Provider::GoogleScholar => request.google_scholar_authors.len(),
+    };
     let journals = request.source_ids.len();
 
     let subject = match (authors, journals) {
@@ -558,13 +780,28 @@ fn channel_metadata(request: &FeedRequest) -> (String, String) {
 
     let title = format!("Recent publications ({subject})");
     let description =
-        format!("An RSS feed of recent publications for {subject}, parsed from OpenAlex.");
+        format!("An RSS feed of recent publications for {subject}, parsed from {provider_name}.");
     (title, description)
+}
+
+async fn fetch_works(request: &FeedRequest) -> Result<Vec<Work>, String> {
+    match request.provider {
+        Provider::OpenAlex => fetch_openalex_works(request).await,
+        Provider::GoogleScholar => {
+            let works = google_scholar::fetch_works(
+                &CLIENT,
+                &request.google_scholar_authors,
+                &request.from,
+            )
+            .await?;
+            Ok(merge_works(works, Vec::new()))
+        }
+    }
 }
 
 /// Fetch works for the feed as the UNION of an author query and a journal query,
 /// merged, deduplicated by work id, and sorted newest-first.
-async fn fetch_works(request: &FeedRequest) -> Vec<Work> {
+async fn fetch_openalex_works(request: &FeedRequest) -> Result<Vec<Work>, String> {
     let topic_suffix = if request.topics.is_empty() {
         String::new()
     } else {
@@ -586,14 +823,16 @@ async fn fetch_works(request: &FeedRequest) -> Vec<Work> {
     });
 
     // Run the (up to two) queries concurrently.
-    let (mut author_works, mut journal_works) = tokio::join!(
+    let (author_works, journal_works) = tokio::join!(
         fetch_works_for_filter(author_filter),
         fetch_works_for_filter(journal_filter),
     );
+    let mut author_works = author_works?;
+    let mut journal_works = journal_works?;
     mark_feed_authors(&mut author_works, &request.author_ids);
     mark_feed_authors(&mut journal_works, &request.author_ids);
 
-    merge_works(author_works, journal_works)
+    Ok(merge_works(author_works, journal_works))
 }
 
 fn mark_feed_authors(works: &mut [Work], feed_author_ids: &[String]) {
@@ -639,12 +878,13 @@ enum VersionKey {
 /// Merge two result sets, deduplicating exact OpenAlex records and grouping versions that
 /// share a DOI, or a normalized title together with the same author ids *or* author names.
 fn merge_works(primary: Vec<Work>, secondary: Vec<Work>) -> Vec<Work> {
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
     let mut version_groups: HashMap<VersionKey, usize> = HashMap::new();
     let mut works: Vec<Work> = Vec::new();
 
     for work in primary.into_iter().chain(secondary) {
-        if work.id.as_ref().is_some_and(|id| !seen.insert(id.clone())) {
+        if let Some(index) = work.id.as_ref().and_then(|id| seen.get(id)).copied() {
+            merge_work_version(&mut works[index], work);
             continue;
         }
 
@@ -653,6 +893,9 @@ fn merge_works(primary: Vec<Work>, secondary: Vec<Work>) -> Vec<Work> {
 
         match group {
             Some(index) => {
+                if let Some(id) = &work.id {
+                    seen.insert(id.clone(), index);
+                }
                 merge_work_version(&mut works[index], work);
                 // Register the incoming record's keys too, so later records matching
                 // either variant land in the same group.
@@ -662,6 +905,9 @@ fn merge_works(primary: Vec<Work>, secondary: Vec<Work>) -> Vec<Work> {
             }
             None => {
                 let index = works.len();
+                if let Some(id) = &work.id {
+                    seen.insert(id.clone(), index);
+                }
                 for key in keys {
                     version_groups.insert(key, index);
                 }
@@ -860,10 +1106,10 @@ fn version_quality(work: &Work) -> (bool, bool, bool, &str) {
 }
 
 /// Run a single `/works` query for the given filter (or return empty if `None`).
-async fn fetch_works_for_filter(filter: Option<String>) -> Vec<Work> {
+async fn fetch_works_for_filter(filter: Option<String>) -> Result<Vec<Work>, String> {
     let filter = match filter {
         Some(f) => f,
-        None => return Vec::new(),
+        None => return Ok(Vec::new()),
     };
 
     let mut pairs = vec![
@@ -875,29 +1121,21 @@ async fn fetch_works_for_filter(filter: Option<String>) -> Vec<Work> {
         pairs.push(("mailto".to_string(), m));
     }
 
-    let url = match url::Url::parse_with_params(&format!("{API_BASE}/works"), &pairs) {
-        Ok(url) => url,
-        Err(err) => {
-            eprintln!("Failed to build OpenAlex URL: {err}");
-            return Vec::new();
-        }
-    };
+    let url = url::Url::parse_with_params(&format!("{API_BASE}/works"), &pairs)
+        .map_err(|error| format!("Failed to build OpenAlex URL: {error}"))?;
+    let response = CLIENT
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| format!("OpenAlex request failed: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("OpenAlex request failed: {error}"))?;
+    let body = response
+        .json::<WorksResponse>()
+        .await
+        .map_err(|error| format!("Failed to parse OpenAlex response: {error}"))?;
 
-    let response = match CLIENT.get(url).send().await {
-        Ok(resp) => resp,
-        Err(err) => {
-            eprintln!("OpenAlex request failed: {err}");
-            return Vec::new();
-        }
-    };
-
-    match response.json::<WorksResponse>().await {
-        Ok(body) => body.results,
-        Err(err) => {
-            eprintln!("Failed to parse OpenAlex response: {err}");
-            Vec::new()
-        }
-    }
+    Ok(body.results)
 }
 
 fn work_to_item(work: &Work) -> rss::Item {
@@ -1088,6 +1326,22 @@ mod tests {
                 Some("W3".to_string()),
                 Some("W1".to_string())
             ]
+        );
+    }
+
+    #[test]
+    fn merge_unions_matched_authors_for_identical_provider_results() {
+        let mut first = work(Some("W1"), Some("2025-01-01"));
+        first.matched_author_names = vec!["Ada Lovelace".to_string()];
+        let mut second = work(Some("W1"), Some("2025-01-01"));
+        second.matched_author_names = vec!["Grace Hopper".to_string()];
+
+        let merged = merge_works(vec![first], vec![second]);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0].matched_author_names,
+            vec!["Ada Lovelace", "Grace Hopper"]
         );
     }
 
@@ -1367,5 +1621,87 @@ mod tests {
         assert_eq!(publication.authors.len(), 1);
         assert_eq!(publication.authors[0].name, "Tang, Sophia");
         assert!(publication.authors[0].matched_feed);
+    }
+
+    #[test]
+    fn provider_names_parse_with_openalex_as_the_default_spelling() {
+        assert_eq!(Provider::parse("openalex").unwrap(), Provider::OpenAlex);
+        assert_eq!(
+            Provider::parse("google-scholar").unwrap(),
+            Provider::GoogleScholar
+        );
+        assert_eq!(
+            Provider::parse("google_scholar").unwrap(),
+            Provider::GoogleScholar
+        );
+        assert!(Provider::parse("unknown").is_err());
+    }
+
+    #[tokio::test]
+    async fn unified_people_resolve_for_google_scholar_without_openalex_calls() {
+        let config: Config = toml::from_str(
+            r#"
+default_feed = "bioml"
+
+[settings]
+from_days = 365
+
+[feeds.bioml]
+title = "BioML"
+google_scholar_authors = ["Legacy Author"]
+
+[[feeds.bioml.people]]
+name = "Pranam Chatterjee"
+openalex_id = "A1"
+
+[[feeds.bioml.people]]
+name = "David Baker"
+openalex_id = "A2"
+google_scholar_name = "David W Baker"
+"#,
+        )
+        .unwrap();
+
+        let request = resolve_feed_request(&[], &config, Provider::GoogleScholar)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(request.provider, Provider::GoogleScholar);
+        assert!(request.author_ids.is_empty());
+        assert_eq!(
+            request.google_scholar_authors,
+            vec!["David W Baker", "Legacy Author", "Pranam Chatterjee"]
+        );
+        assert!(request.source_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unified_people_resolve_precise_openalex_ids() {
+        let config: Config = toml::from_str(
+            r#"
+default_feed = "bioml"
+
+[feeds.bioml]
+title = "BioML"
+
+[[feeds.bioml.people]]
+name = "Pranam Chatterjee"
+openalex_id = "https://openalex.org/A5016342562"
+
+[[feeds.bioml.people]]
+name = "Scholar only"
+"#,
+        )
+        .unwrap();
+
+        let request = resolve_feed_request(&[], &config, Provider::OpenAlex)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(request.provider, Provider::OpenAlex);
+        assert_eq!(request.author_ids, vec!["A5016342562"]);
+        assert!(request.google_scholar_authors.is_empty());
     }
 }

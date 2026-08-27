@@ -24,12 +24,21 @@ pub struct Settings {
 pub struct FeedConfig {
     /// Optional RSS channel title override.
     pub title: Option<String>,
+    /// Canonical people with provider-specific identifiers.
+    #[serde(default)]
+    pub people: Vec<PersonConfig>,
+    /// Legacy OpenAlex author IDs.
     #[serde(default)]
     pub author_ids: Vec<String>,
+    /// Legacy ORCIDs resolved to OpenAlex author IDs.
     #[serde(default)]
     pub orcids: Vec<String>,
+    /// Legacy author names resolved through OpenAlex search.
     #[serde(default)]
     pub authors: Vec<String>,
+    /// Legacy author names used by the archived Google Scholar provider.
+    #[serde(default)]
+    pub google_scholar_authors: Vec<String>,
     #[serde(default)]
     pub source_ids: Vec<String>,
     #[serde(default)]
@@ -40,6 +49,16 @@ pub struct FeedConfig {
     pub topics: Vec<String>,
     /// Explicit earliest publication date (YYYY-MM-DD); overrides `from_days`.
     pub from: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PersonConfig {
+    /// Canonical human-readable name.
+    pub name: String,
+    /// Precise OpenAlex author ID.
+    pub openalex_id: Option<String>,
+    /// Optional Google Scholar query spelling; defaults to `name`.
+    pub google_scholar_name: Option<String>,
 }
 
 impl Config {

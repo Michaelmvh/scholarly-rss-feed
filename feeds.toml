@@ -8,26 +8,6 @@ from_days = 365
 # `default_feed` above is the one served at the bare "/" URL.
 [feeds.bioml]
 title = "Machine Learning & Synthetic Biology"
-# OpenAlex author ids (most precise; find them at https://openalex.org).
-author_ids = [
-  "A5135542215", # David Baker
-  "A5005023517", # Jeff Nivala
-  "A5010124873", # Regina Barzilay
-  "A5048915657", # Tommi Jaakkola
-  "A5084204507", # Sergey Ovchinnikov
-  "A5016342562", # Pranam Chatterjee
-  "A5008892922", # Matthew D. Golub
-  "A5114342824", # Nathaniel Corley
-  "A5013638126", # Michael M. Bronstein
-  "A5105925656", # Frank DiMaio
-  "A5079904764", # Pang Wei Koh
-  "A5009046042", # Ariane Mora
-  "A5060834723", # Kevin K. Yang
-  "A5076162644", # Connor W. Coley
-  "A5012131505", # Chris Thachuk
-  "A5059179935", # John Jumper
-  "A5071306257", # Ava P. Amini
-]
 # You can also list ORCIDs and names (names are imprecise for common authors):
 # orcids  = ["0000-0002-1825-0097"]
 # authors = ["Regina Barzilay"]
@@ -40,6 +20,74 @@ author_ids = [
 # topics  = ["T10091"]
 # Optional explicit start date (overrides from_days):
 # from    = "2025-01-01"
+
+[[feeds.bioml.people]]
+name = "David Baker"
+openalex_id = "A5135542215"
+
+[[feeds.bioml.people]]
+name = "Jeff Nivala"
+openalex_id = "A5005023517"
+
+[[feeds.bioml.people]]
+name = "Regina Barzilay"
+openalex_id = "A5010124873"
+
+[[feeds.bioml.people]]
+name = "Tommi Jaakkola"
+openalex_id = "A5048915657"
+
+[[feeds.bioml.people]]
+name = "Sergey Ovchinnikov"
+openalex_id = "A5084204507"
+
+[[feeds.bioml.people]]
+name = "Pranam Chatterjee"
+openalex_id = "A5016342562"
+
+[[feeds.bioml.people]]
+name = "Matthew D. Golub"
+openalex_id = "A5008892922"
+
+[[feeds.bioml.people]]
+name = "Nathaniel Corley"
+openalex_id = "A5114342824"
+
+[[feeds.bioml.people]]
+name = "Michael M. Bronstein"
+openalex_id = "A5013638126"
+
+[[feeds.bioml.people]]
+name = "Frank DiMaio"
+openalex_id = "A5105925656"
+
+[[feeds.bioml.people]]
+name = "Pang Wei Koh"
+openalex_id = "A5079904764"
+
+[[feeds.bioml.people]]
+name = "Ariane Mora"
+openalex_id = "A5009046042"
+
+[[feeds.bioml.people]]
+name = "Kevin K. Yang"
+openalex_id = "A5060834723"
+
+[[feeds.bioml.people]]
+name = "Connor W. Coley"
+openalex_id = "A5076162644"
+
+[[feeds.bioml.people]]
+name = "Chris Thachuk"
+openalex_id = "A5012131505"
+
+[[feeds.bioml.people]]
+name = "John Jumper"
+openalex_id = "A5059179935"
+
+[[feeds.bioml.people]]
+name = "Ava P. Amini"
+openalex_id = "A5071306257"
 
 # A journal-only feed: recent papers from specific journals, no authors required.
 [feeds.top-journals]

@@ -40,6 +40,8 @@ pub struct Work {
     pub primary_location: Option<Location>,
     pub best_oa_location: Option<Location>,
     pub abstract_inverted_index: Option<HashMap<String, Vec<u32>>>,
+    #[serde(skip)]
+    pub abstract_text_override: Option<String>,
     #[serde(default)]
     pub alternate_links: Vec<String>,
     #[serde(skip)]
@@ -130,6 +132,9 @@ impl Work {
 
     /// Reconstruct the abstract text from OpenAlex's inverted index.
     pub fn abstract_text(&self) -> Option<String> {
+        if self.abstract_text_override.is_some() {
+            return self.abstract_text_override.clone();
+        }
         let index = self.abstract_inverted_index.as_ref()?;
         if index.is_empty() {
             return None;

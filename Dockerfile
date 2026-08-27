@@ -18,8 +18,8 @@ RUN touch src/main.rs && cargo build --release
 FROM debian:bookworm-slim
 WORKDIR /app
 
-# TLS trust for HTTPS calls to the OpenAlex API is provided by rustls' bundled
-# Mozilla roots, so no ca-certificates package is required.
+# TLS trust for provider API calls is provided by rustls, so no
+# ca-certificates package is required.
 COPY --from=builder /app/target/release/scholarly-rss-feed /usr/local/bin/scholarly-rss-feed
 
 # Bake the feed definitions into the image so the repo is the single source of

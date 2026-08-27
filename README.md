@@ -3,7 +3,8 @@
 Generates a single RSS feed of recent scientific publications for one or more authors
 **and/or journals**, sorted newest-first. Data is parsed from
 [OpenAlex](https://openalex.org) (a free, open catalog of scholarly works — no API key
-required).
+required). The project's original Google Scholar scraper is retained as an archived fallback
+provider that can be enabled with one environment variable.
 
 Feeds can be defined in a config file so a feed URL never has to change. Each URL provides a
 lightweight browser reader by default and raw RSS through the `rss` query parameter, making it
@@ -12,8 +13,9 @@ convenient to use both on the web and in a display such as a
 
 This project was originally based on
 [Julien-cpsn/google-scholar-rss-feed](https://github.com/Julien-cpsn/google-scholar-rss-feed)
-and has since been redesigned around OpenAlex. The original copyright and MIT license notice
-are retained in [`LICENSE`](./LICENSE).
+and has since been redesigned around OpenAlex. Its Google Scholar scraping behavior is
+preserved and hardened in [`src/google_scholar.rs`](./src/google_scholar.rs). The original
+copyright and MIT license notice are retained in [`LICENSE`](./LICENSE).
 
 ## Deployment overview
 
@@ -65,7 +67,14 @@ from_days = 365                    # default recency window
 
 [feeds.myfield]
 title = "Machine Learning & Synthetic Biology"
-author_ids = ["A5135542215", "A5005023517", "A5010124873"]
+
+[[feeds.myfield.people]]
+name = "David Baker"
+openalex_id = "A5135542215"
+
+[[feeds.myfield.people]]
+name = "Jeff Nivala"
+openalex_id = "A5005023517"
 
 [feeds.synbio]
 title = "Synthetic Biology"
@@ -82,7 +91,7 @@ Per-feed keys:
 | Key | Purpose |
 |---|---|
 | `title` | Optional RSS channel title |
-| `author_ids` | OpenAlex author IDs; preferred because they are the most precise |
+| `people` | Canonical author records shared by all providers |
 | `orcids` | ORCIDs resolved to OpenAlex author IDs |
 | `authors` | Author names resolved by top search result; imprecise for common names |
 | `source_ids` | OpenAlex journal/source IDs; preferred |
@@ -90,6 +99,17 @@ Per-feed keys:
 | `journals` | Journal names resolved by top search result |
 | `topics` | OpenAlex topic IDs used to narrow results |
 | `from` | Explicit earliest publication date in `YYYY-MM-DD` format |
+
+Each `people` entry accepts:
+
+| Key | Purpose |
+|---|---|
+| `name` | Required canonical name and default Google Scholar query |
+| `openalex_id` | Optional precise OpenAlex author ID |
+| `google_scholar_name` | Optional Scholar query spelling when it differs from `name` |
+
+The legacy `author_ids`, `authors`, and `google_scholar_authors` arrays remain supported for
+existing configuration files, but new feeds should use `people`.
 
 A feed requires at least one author or journal. If both are present, results are the **union**
 of the authors' publications and recent publications in the journals. Results are
@@ -108,6 +128,31 @@ The config is read on every request. Identical resolved queries are cached for u
 so restarting the application clears the cache immediately. In Docker, changing the repository
 copy of `feeds.toml` requires publishing and deploying a new image because the file is baked
 into that image.
+
+### Switching providers
+
+OpenAlex is the default and recommended provider. To use the archived Google Scholar scraper,
+set:
+
+```env
+GSRF_PROVIDER=google-scholar
+```
+
+Then restart or recreate the application. The public reader and RSS URLs do not change. Set
+`GSRF_PROVIDER=openalex` and restart to switch back.
+
+Each named feed intended to support both providers should define `people` records. Scholar uses
+each person's canonical `name` unless `google_scholar_name` overrides it, while OpenAlex uses
+`openalex_id`. The production `bioml` feed has been migrated to this format. Ad-hoc `?author=`
+values also work with the Google Scholar provider. Journal, source, ORCID, and topic filters
+are OpenAlex-only.
+
+Google Scholar does not provide a supported public API. This fallback uses the project's
+original unofficial HTML scraper and can be blocked or broken by markup changes. Provider
+errors return HTTP 502 and are logged rather than silently returning an empty feed. The switch
+is intentionally explicit instead of automatic so an OpenAlex outage cannot unexpectedly
+trigger many Google Scholar requests. Google Scholar exposes only a publication year in these
+results, so the `from` cutoff is truncated to that year when this provider is active.
 
 ### Finding reliable OpenAlex IDs
 
@@ -172,7 +217,7 @@ path:
 
 ```sh
 cargo run -- "0.0.0.0:3005" --config feeds.toml
-GSRF_CONFIG=feeds.toml GSRF_MAILTO=you@example.com cargo run
+GSRF_CONFIG=feeds.toml GSRF_MAILTO=you@example.com GSRF_PROVIDER=openalex cargo run
 ```
 
 Useful development checks:
@@ -181,6 +226,11 @@ Useful development checks:
 cargo test
 cargo clippy --all-targets --all-features
 ```
+
+The test suite uses local fixtures and constructed provider records; it does not contact
+OpenAlex or Google Scholar. It covers provider selection, Google Scholar result conversion,
+feed configuration, version deduplication, author highlighting, RSS conversion, HTML escaping,
+and article previews.
 
 ### Local Docker Compose
 
@@ -209,8 +259,8 @@ docker compose -f local/docker-compose.yml down
 
 The local Compose file contains a commented bind mount for `feeds.toml`. Enable it when config
 changes should be visible without rebuilding the image; restart the container to clear any
-cached feed immediately. Set `GSRF_MAILTO` in your shell or in a repository-root `.env` file
-before starting Compose.
+cached feed immediately. Set `GSRF_MAILTO` and, optionally, `GSRF_PROVIDER` in your shell or in
+a repository-root `.env` file before starting Compose.
 
 ## GitHub Actions and GHCR
 
@@ -289,6 +339,7 @@ The existing GitHub Pages site can coexist with the tunnel:
 
    ```env
    TUNNEL_TOKEN=eyJ...
+   GSRF_PROVIDER=openalex
    ```
 
    The resulting directory must contain:
@@ -368,8 +419,11 @@ Every successful workflow build publishes an immutable `sha-...` image tag. To r
 
 Normal TRMNL polling will not overwhelm the NAS. The generated RSS channel for each resolved
 query is cached in memory for up to one hour. A cache hit only clones and serializes the
-already-built channel; it does not call OpenAlex again. A cold request makes at most one author
-works query and one journal works query, concurrently.
+already-built channel; it does not call a provider again. A cold OpenAlex request makes at most
+one author query and one journal query, concurrently. A cold Google Scholar request makes one
+query per configured person, sequentially. Concurrent requests for the same uncached feed
+share one in-flight build instead of duplicating provider traffic, and provider requests use
+finite connection and total timeouts.
 
 Use stable OpenAlex IDs in `feeds.toml` and give TRMNL a named feed URL such as
 `https://reading.michaelmvh.com/?feed=myfield&rss`. Name, ORCID, ISSN, and journal-name parameters
@@ -380,8 +434,6 @@ Current limitations:
 - Cloudflare Tunnel transports requests but does not automatically cache this dynamic RSS URL.
 - The application has no rate limiter.
 - Different ad-hoc parameters create different cache entries until the hourly cache clear.
-- Simultaneous requests for the same uncached feed can each start an OpenAlex fetch before the
-  first result enters the cache.
 
 These limitations are not significant for ordinary TRMNL use, but Cloudflare can cheaply
 protect the public endpoint:

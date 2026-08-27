@@ -6,6 +6,7 @@ services:
     container_name: scholar-rss
     environment:
       - GSRF_MAILTO=${GSRF_MAILTO}
+      - GSRF_PROVIDER=${GSRF_PROVIDER:-openalex}
     expose:
       - "3005"
     restart: unless-stopped

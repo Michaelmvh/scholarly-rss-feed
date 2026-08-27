@@ -7,6 +7,7 @@ services:
     container_name: scholar-rss
     environment:
       - GSRF_MAILTO=${GSRF_MAILTO:-}
+      - GSRF_PROVIDER=${GSRF_PROVIDER:-openalex}
     ports:
       - "3005:3005"
     # feeds.toml is baked into the image, so no mount is required. To override the
