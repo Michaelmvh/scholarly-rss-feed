@@ -42,6 +42,8 @@ pub struct Work {
     pub abstract_inverted_index: Option<HashMap<String, Vec<u32>>>,
     #[serde(default)]
     pub alternate_links: Vec<String>,
+    #[serde(skip)]
+    pub matched_author_names: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,7 +98,13 @@ impl Work {
             .as_deref()
             .unwrap_or_default()
             .iter()
-            .filter_map(|a| a.author.as_ref().and_then(|au| au.display_name.clone()))
+            .filter_map(|authorship| {
+                authorship
+                    .author
+                    .as_ref()
+                    .and_then(|author| author.display_name.clone())
+                    .or_else(|| authorship.raw_author_name.clone())
+            })
             .collect()
     }
 

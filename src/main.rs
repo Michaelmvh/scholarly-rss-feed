@@ -1,5 +1,6 @@
 mod config;
 mod openalex;
+mod reader;
 
 use crate::config::{Config, FeedConfig};
 use crate::openalex::{
@@ -30,7 +31,7 @@ use tokio::net::TcpListener;
 use tokio::time::Instant;
 
 lazy_static! {
-    pub static ref RSS_CHANNELS: Arc<RwLock<HashMap<FeedRequest, Channel>>> =
+    static ref RSS_CHANNELS: Arc<RwLock<HashMap<FeedRequest, GeneratedFeed>>> =
         Arc::new(RwLock::new(HashMap::new()));
     pub static ref CLIENT: reqwest::Client = reqwest::Client::builder()
         .user_agent("scholarly-rss-feed")
@@ -41,6 +42,12 @@ lazy_static! {
 static CONFIG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 const DEFAULT_FROM_DAYS: u32 = 365;
+
+#[derive(Clone)]
+struct GeneratedFeed {
+    channel: Channel,
+    reader: reader::Feed,
+}
 
 /// Fully-resolved description of a feed, used as the cache key.
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
@@ -94,7 +101,7 @@ async fn main() {
 
             tokio::task::spawn(async move {
                 match http1::Builder::new()
-                    .serve_connection(io, service_fn(send_rss))
+                    .serve_connection(io, service_fn(serve_feed))
                     .await
                 {
                     Ok(_) => (),
@@ -131,7 +138,7 @@ fn parse_cli_args() -> (String, PathBuf) {
     (address, PathBuf::from(config))
 }
 
-async fn send_rss(request: Request<Incoming>) -> Result<Response<Full<Bytes>>, Error> {
+async fn serve_feed(request: Request<Incoming>) -> Result<Response<Full<Bytes>>, Error> {
     // Preserve repeated query params (e.g. multiple ?author_id=).
     let params: Vec<(String, String)> = request
         .uri()
@@ -165,17 +172,43 @@ async fn send_rss(request: Request<Incoming>) -> Result<Response<Full<Bytes>>, E
         }
     };
 
-    let channel = generate_channel_if_needed(feed_request).await;
+    let feed = generate_feed_if_needed(feed_request).await;
+    let (status, content_type, body) = if has_param(&params, "rss") {
+        (
+            StatusCode::OK,
+            "text/xml; charset=utf-8",
+            Bytes::from(feed.channel.to_string()),
+        )
+    } else if let Some(article_id) = first_param(&params, "article") {
+        match reader::render_article(&feed.reader, &article_id, &params) {
+            Some(html) => (
+                StatusCode::OK,
+                "text/html; charset=utf-8",
+                Bytes::from(html),
+            ),
+            None => (
+                StatusCode::NOT_FOUND,
+                "text/plain; charset=utf-8",
+                Bytes::from("Publication not found in this feed."),
+            ),
+        }
+    } else {
+        (
+            StatusCode::OK,
+            "text/html; charset=utf-8",
+            Bytes::from(reader::render_feed(&feed.reader, &params)),
+        )
+    };
 
     Response::builder()
-        .header("Content-Type", "text/xml; charset=utf-8")
+        .header("Content-Type", content_type)
         .header("Access-Control-Allow-Origin", "*")
         .header(
             "Cache-Control",
             "public, max-age=300, s-maxage=7200, stale-while-revalidate=86400",
         )
-        .status(StatusCode::OK)
-        .body(Full::new(Bytes::from(channel.to_string())))
+        .status(status)
+        .body(Full::new(body))
 }
 
 fn config_path() -> &'static PathBuf {
@@ -198,6 +231,10 @@ fn first_param(params: &[(String, String)], key: &str) -> Option<String> {
         .find(|(k, _)| k == key)
         .map(|(_, v)| v.clone())
         .filter(|v| !v.trim().is_empty())
+}
+
+fn has_param(params: &[(String, String)], key: &str) -> bool {
+    params.iter().any(|(name, _)| name == key)
 }
 
 /// Merge a named feed (if any) with ad-hoc URL params, resolve every identifier to an
@@ -437,26 +474,26 @@ async fn resolve_journal_name(name: &str) -> Option<(String, String)> {
     Some((id, display))
 }
 
-async fn generate_channel_if_needed(request: FeedRequest) -> Channel {
+async fn generate_feed_if_needed(request: FeedRequest) -> GeneratedFeed {
     let key = request.cache_key();
-    if let Some(channel) = find_cached(&key) {
-        return channel;
+    if let Some(feed) = find_cached(&key) {
+        return feed;
     }
 
-    let channel = build_channel(&request).await;
-    RSS_CHANNELS.write().insert(request, channel.clone());
-    channel
+    let feed = build_feed(&request).await;
+    RSS_CHANNELS.write().insert(request, feed.clone());
+    feed
 }
 
-fn find_cached(key: &(Vec<String>, Vec<String>, String, Vec<String>)) -> Option<Channel> {
+fn find_cached(key: &(Vec<String>, Vec<String>, String, Vec<String>)) -> Option<GeneratedFeed> {
     let channels = RSS_CHANNELS.read();
     channels
         .iter()
-        .find(|(req, _)| &req.cache_key() == key)
-        .map(|(_, channel)| channel.clone())
+        .find(|(request, _)| &request.cache_key() == key)
+        .map(|(_, feed)| feed.clone())
 }
 
-async fn build_channel(request: &FeedRequest) -> Channel {
+async fn build_feed(request: &FeedRequest) -> GeneratedFeed {
     println!(
         "Building RSS channel for authors [{}] journals [{}] from {}",
         request.author_ids.join(", "),
@@ -467,9 +504,9 @@ async fn build_channel(request: &FeedRequest) -> Channel {
     let (title, description) = channel_metadata(request);
 
     let mut channel = ChannelBuilder::default()
-        .title(title)
+        .title(title.clone())
         .link(String::from("https://openalex.org"))
-        .description(description)
+        .description(description.clone())
         .language(String::from("en-US"))
         .generator(String::from("scholarly-rss-feed"))
         .ttl(String::from("60"))
@@ -491,7 +528,16 @@ async fn build_channel(request: &FeedRequest) -> Channel {
     channel.set_pub_date(now.clone());
     channel.set_last_build_date(now);
 
-    channel
+    let publications = works.iter().map(work_to_publication).collect();
+
+    GeneratedFeed {
+        channel,
+        reader: reader::Feed {
+            title,
+            description,
+            publications,
+        },
+    }
 }
 
 fn channel_metadata(request: &FeedRequest) -> (String, String) {
@@ -540,12 +586,41 @@ async fn fetch_works(request: &FeedRequest) -> Vec<Work> {
     });
 
     // Run the (up to two) queries concurrently.
-    let (author_works, journal_works) = tokio::join!(
+    let (mut author_works, mut journal_works) = tokio::join!(
         fetch_works_for_filter(author_filter),
         fetch_works_for_filter(journal_filter),
     );
+    mark_feed_authors(&mut author_works, &request.author_ids);
+    mark_feed_authors(&mut journal_works, &request.author_ids);
 
     merge_works(author_works, journal_works)
+}
+
+fn mark_feed_authors(works: &mut [Work], feed_author_ids: &[String]) {
+    for work in works {
+        let Some(authorships) = work.authorships.as_deref() else {
+            continue;
+        };
+
+        for authorship in authorships {
+            let Some(author) = authorship.author.as_ref() else {
+                continue;
+            };
+            let Some(author_id) = author.id.as_deref().map(normalize_id) else {
+                continue;
+            };
+            if !feed_author_ids.contains(&author_id) {
+                continue;
+            }
+
+            work.matched_author_names
+                .extend(author.display_name.iter().cloned());
+            work.matched_author_names
+                .extend(authorship.raw_author_name.iter().cloned());
+        }
+        work.matched_author_names.sort();
+        work.matched_author_names.dedup();
+    }
 }
 
 /// A signature that identifies a work well enough to treat two records as versions of
@@ -747,6 +822,11 @@ fn normalize_title(title: &str) -> String {
 }
 
 fn merge_work_version(existing: &mut Work, mut candidate: Work) {
+    let mut matched_author_names = std::mem::take(&mut existing.matched_author_names);
+    matched_author_names.append(&mut candidate.matched_author_names);
+    matched_author_names.sort();
+    matched_author_names.dedup();
+
     if version_quality(&candidate) > version_quality(existing) {
         std::mem::swap(existing, &mut candidate);
     }
@@ -761,6 +841,7 @@ fn merge_work_version(existing: &mut Work, mut candidate: Work) {
     alternate_links.sort();
     alternate_links.dedup();
     existing.alternate_links = alternate_links;
+    existing.matched_author_names = matched_author_names;
 }
 
 fn version_quality(work: &Work) -> (bool, bool, bool, &str) {
@@ -877,6 +958,50 @@ fn work_to_item(work: &Work) -> rss::Item {
         .dublin_core_ext(dublin_core)
         .content(work.abstract_text())
         .build()
+}
+
+fn work_to_publication(work: &Work) -> reader::Publication {
+    let matched_names = work
+        .matched_author_names
+        .iter()
+        .map(|name| normalize_author_name(name))
+        .collect::<Vec<_>>();
+    let authors = work
+        .authorships
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|authorship| {
+            let display_name = authorship
+                .author
+                .as_ref()
+                .and_then(|author| author.display_name.clone())
+                .or_else(|| authorship.raw_author_name.clone())?;
+            let matched_feed = authorship
+                .author
+                .as_ref()
+                .and_then(|author| author.display_name.as_deref())
+                .into_iter()
+                .chain(authorship.raw_author_name.as_deref())
+                .map(normalize_author_name)
+                .any(|name| matched_names.contains(&name));
+
+            Some(reader::Author {
+                name: display_name,
+                matched_feed,
+            })
+        })
+        .collect();
+
+    reader::Publication {
+        id: work.id.clone().or_else(|| work.best_link()),
+        title: work.best_title(),
+        link: work.best_link(),
+        publication_date: work.publication_date.clone(),
+        venue: work.venue(),
+        authors,
+        abstract_text: work.abstract_text(),
+    }
 }
 
 /// Convert an OpenAlex `YYYY-MM-DD` date into an RFC-2822 timestamp.
@@ -1161,7 +1286,7 @@ mod tests {
             "title": "Example",
             "authorships": [
                 {"author": {"display_name": "Ada Lovelace"}},
-                {"author": {"display_name": "Grace Hopper"}}
+                {"author": {}, "raw_author_name": "Grace Hopper"}
             ],
             "best_oa_location": {
                 "pdf_url": "https://example.com/paper.pdf"
@@ -1181,5 +1306,66 @@ mod tests {
             .description
             .as_deref()
             .is_some_and(|description| description.contains("https://example.com/paper.pdf")));
+    }
+
+    #[test]
+    fn publication_marks_every_matching_author_without_changing_rss_categories() {
+        let mut works: Vec<Work> = vec![serde_json::from_value(serde_json::json!({
+            "id": "https://openalex.org/W1",
+            "title": "Collaborative work",
+            "authorships": [
+                {"author": {"id": "https://openalex.org/A1", "display_name": "Ada Lovelace"}},
+                {"author": {"id": "https://openalex.org/A2"}, "raw_author_name": "Grace Hopper"},
+                {"author": {"id": "https://openalex.org/A3", "display_name": "Alan Turing"}}
+            ]
+        }))
+        .unwrap()];
+        let feed_author_ids = vec!["A1".to_string(), "A2".to_string()];
+
+        mark_feed_authors(&mut works, &feed_author_ids);
+        let publication = work_to_publication(&works[0]);
+        let item = work_to_item(&works[0]);
+
+        assert_eq!(
+            publication
+                .authors
+                .iter()
+                .filter(|author| author.matched_feed)
+                .map(|author| author.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Ada Lovelace", "Grace Hopper"],
+        );
+        assert!(item.categories.is_empty());
+    }
+
+    #[test]
+    fn merge_preserves_matched_author_from_a_discarded_version() {
+        let first: Work = serde_json::from_value(serde_json::json!({
+            "id": "W-original",
+            "title": "A shared title",
+            "authorships": [
+                {"author": {"id": "A-configured", "display_name": "Sophia Tang"}}
+            ]
+        }))
+        .unwrap();
+        let richer: Work = serde_json::from_value(serde_json::json!({
+            "id": "W-richer",
+            "title": "A shared title",
+            "authorships": [
+                {"author": {"id": "A-duplicate"}, "raw_author_name": "Tang, Sophia"}
+            ],
+            "abstract_inverted_index": {"Abstract": [0]}
+        }))
+        .unwrap();
+        let mut first_version = vec![first];
+
+        mark_feed_authors(&mut first_version, &["A-configured".to_string()]);
+        let merged = merge_works(first_version, vec![richer]);
+        let publication = work_to_publication(&merged[0]);
+
+        assert_eq!(merged[0].id.as_deref(), Some("W-richer"));
+        assert_eq!(publication.authors.len(), 1);
+        assert_eq!(publication.authors[0].name, "Tang, Sophia");
+        assert!(publication.authors[0].matched_feed);
     }
 }

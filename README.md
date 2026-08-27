@@ -5,8 +5,10 @@ Generates a single RSS feed of recent scientific publications for one or more au
 [OpenAlex](https://openalex.org) (a free, open catalog of scholarly works — no API key
 required).
 
-Feeds can be defined in a config file so a feed URL never has to change, which makes this
-convenient to drop into a display such as a [TRMNL](https://usetrmnl.com) via its RSS plugin.
+Feeds can be defined in a config file so a feed URL never has to change. Each URL provides a
+lightweight browser reader by default and raw RSS through the `rss` query parameter, making it
+convenient to use both on the web and in a display such as a
+[TRMNL](https://usetrmnl.com) via its RSS plugin.
 
 This project was originally based on
 [Julien-cpsn/google-scholar-rss-feed](https://github.com/Julien-cpsn/google-scholar-rss-feed)
@@ -124,8 +126,10 @@ OpenAlex URLs and bare IDs are both accepted and normalized, for example
 
 After starting the service:
 
-- Default configured feed: `http://localhost:3005/`
-- Named feed: `http://localhost:3005/?feed=myfield`
+- Default configured reader: `http://localhost:3005/`
+- Default configured raw RSS: `http://localhost:3005/?rss`
+- Named feed reader: `http://localhost:3005/?feed=myfield`
+- Named feed raw RSS: `http://localhost:3005/?feed=myfield&rss`
 - Multiple ad-hoc authors:
   `http://localhost:3005/?author_id=A5135542215&author_id=A5005023517`
 
@@ -143,9 +147,14 @@ All identifier parameters are repeatable and are merged with a selected named fe
 | `topic` | OpenAlex topic ID used to constrain results |
 | `concept` | Alias for `topic` |
 | `from` | Earliest publication date, `YYYY-MM-DD` |
+| `rss` | Return raw RSS XML instead of the browser reader |
 
-The server returns RSS XML with CORS enabled. The generated channel has a 60-minute TTL, and
-the in-memory cache is cleared hourly.
+The browser reader is server-rendered HTML with no JavaScript or external assets. Selecting a
+publication opens an internal preview page with its abstract and a link to the original
+article. Authors whose configured OpenAlex IDs caused a publication to match the feed are
+highlighted in both views; if several configured authors contributed, each is highlighted.
+Raw RSS has CORS enabled. The generated channel has a 60-minute TTL, and the in-memory cache is
+cleared hourly.
 
 ## Running locally
 
@@ -297,14 +306,19 @@ The existing GitHub Pages site can coexist with the tunnel:
    - Path: `/volume1/docker/scholar-rss`
    - Source: existing `docker-compose.yml`
 8. Build/start the project and confirm both `scholar-rss` and `scholar-rss-tunnel` are running.
-9. Open:
+9. Open the browser reader:
 
    ```text
-   https://reading.michaelmvh.com/?feed=myfield
+   https://reading.michaelmvh.com/
    ```
 
-10. Configure the TRMNL RSS plugin with that HTTPS URL. The URL remains stable when the named
-    feed's contents change.
+10. Configure the TRMNL RSS plugin with the raw feed URL:
+
+    ```text
+    https://reading.michaelmvh.com/?rss
+    ```
+
+    The URL remains stable when the default named feed's contents change.
 
 ### Automatic image updates
 
@@ -358,7 +372,7 @@ already-built channel; it does not call OpenAlex again. A cold request makes at 
 works query and one journal works query, concurrently.
 
 Use stable OpenAlex IDs in `feeds.toml` and give TRMNL a named feed URL such as
-`https://reading.michaelmvh.com/?feed=myfield`. Name, ORCID, ISSN, and journal-name parameters
+`https://reading.michaelmvh.com/?feed=myfield&rss`. Name, ORCID, ISSN, and journal-name parameters
 must be resolved before the channel-cache lookup and can therefore cause extra OpenAlex calls.
 
 Current limitations:
