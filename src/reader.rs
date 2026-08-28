@@ -14,12 +14,20 @@ pub struct Publication {
     pub venue: Option<String>,
     pub authors: Vec<Author>,
     pub abstract_text: Option<String>,
+    pub curated_sources: Vec<Attribution>,
+    pub curated_categories: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
 pub struct Author {
     pub name: String,
     pub matched_feed: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct Attribution {
+    pub name: String,
+    pub url: String,
 }
 
 const STYLES: &str = r#"
@@ -41,6 +49,7 @@ h2 a { color: inherit; text-decoration-color: #9db8b3; }
 .authors { margin: 0; font-size: .9rem; line-height: 1.55; }
 .notable-author { color: #175e54; font-weight: 750; }
 .author-key, .author-note { margin: .75rem 0 0; font: .8rem/1.45 ui-sans-serif, system-ui, sans-serif; color: #625e57; }
+.provenance { margin: .75rem 0 0; font: .78rem/1.5 ui-sans-serif, system-ui, sans-serif; color: #625e57; }
 .empty { padding: 3rem 0; color: #625e57; }
 .back { display: inline-block; margin-bottom: 2.5rem; font-size: .9rem; }
 .article-detail { padding-top: 0; border: 0; }
@@ -76,12 +85,14 @@ pub fn render_feed(feed: &Feed, params: &[(String, String)]) -> String {
         };
         let (date, separator, venue) = render_metadata(publication);
         let authors = render_authors(&publication.authors);
+        let provenance = render_provenance(publication);
 
         articles.push_str(&format!(
             r#"<article>
   <p class="metadata">{date}{separator}{venue}</p>
   <h2>{title_markup}</h2>
   {authors}
+  {provenance}
 </article>
 "#
         ));
@@ -141,6 +152,7 @@ pub fn render_article(
     let back_url = escape_html(&reader_url(params));
     let (date, separator, venue) = render_metadata(publication);
     let authors = render_authors(&publication.authors);
+    let provenance = render_provenance(publication);
     let author_note = if publication.authors.iter().any(|author| author.matched_feed) {
         r#"<p class="author-note"><strong class="notable-author">Highlighted authors</strong> matched this feed.</p>"#
     } else {
@@ -181,6 +193,7 @@ pub fn render_article(
       <p class="metadata">{date}{separator}{venue}</p>
       <h1>{item_title}</h1>
       {authors}
+      {provenance}
       {author_note}
       <section class="abstract" aria-labelledby="abstract-heading">
         <h2 id="abstract-heading">Abstract</h2>
@@ -235,6 +248,35 @@ fn render_authors(authors: &[Author]) -> String {
         .join(", ");
 
     format!(r#"<p class="authors">{authors}</p>"#)
+}
+
+fn render_provenance(publication: &Publication) -> String {
+    if publication.curated_sources.is_empty() {
+        return String::new();
+    }
+
+    let sources = publication
+        .curated_sources
+        .iter()
+        .map(|source| {
+            format!(
+                r#"<a href="{}" rel="external">{}</a>"#,
+                escape_html(&source.url),
+                escape_html(&source.name)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let categories = if publication.curated_categories.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " · {}",
+            escape_html(&publication.curated_categories.join(" · "))
+        )
+    };
+
+    format!(r#"<p class="provenance">Curated by {sources}{categories}</p>"#)
 }
 
 fn raw_feed_url(params: &[(String, String)]) -> String {
@@ -326,6 +368,11 @@ mod tests {
                     },
                 ],
                 abstract_text: Some("<strong>abstract</strong>".to_string()),
+                curated_sources: vec![Attribution {
+                    name: "Curated Source".to_string(),
+                    url: "https://example.com/source?a=1&b=2".to_string(),
+                }],
+                curated_categories: vec!["Protein design".to_string()],
             }],
         }
     }
@@ -352,6 +399,8 @@ mod tests {
         assert!(!html.contains("<script>alert"));
         assert!(html.contains("article=https%3A%2F%2Fopenalex.org%2FW1"));
         assert!(html.contains("href=\"?feed=myfield&amp;rss\""));
+        assert!(html.contains("Curated by"));
+        assert!(html.contains("https://example.com/source?a=1&amp;b=2"));
     }
 
     #[test]

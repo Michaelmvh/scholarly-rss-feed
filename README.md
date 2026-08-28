@@ -92,6 +92,7 @@ Per-feed keys:
 |---|---|
 | `title` | Optional RSS channel title |
 | `people` | Canonical author records shared by all providers |
+| `curated_sources` | Curated paper collections merged into the feed |
 | `orcids` | ORCIDs resolved to OpenAlex author IDs |
 | `authors` | Author names resolved by top search result; imprecise for common names |
 | `source_ids` | OpenAlex journal/source IDs; preferred |
@@ -154,6 +155,29 @@ is intentionally explicit instead of automatic so an OpenAlex outage cannot unex
 trigger many Google Scholar requests. Google Scholar exposes only a publication year in these
 results, so the `from` cutoff is truncated to that year when this provider is active.
 
+### Curated protein-design archive
+
+The named `protein-design-archive` feed ingests stable-ID papers from
+[Peldom/papers_for_protein_design_using_DL](https://github.com/Peldom/papers_for_protein_design_using_DL):
+
+```text
+http://localhost:3005/?feed=protein-design-archive
+http://localhost:3005/?feed=protein-design-archive&rss
+```
+
+This source is independent of the selected OpenAlex or Google Scholar provider. Phase 1
+includes entries with an explicit DOI, bioRxiv DOI (`10.1101` or `10.64898`), or arXiv ID.
+Entries without a stable identifier and entries marked unavailable are skipped. Benchmarks and
+datasets (section 0), small-molecule models (section 7.3), and unclassified commercial reports
+(section 7.5) are intentionally excluded.
+
+The upstream Markdown is fetched at most once every 24 hours with conditional ETag requests,
+a 2 MiB response limit, and the shared provider timeouts. Invalid updates do not replace a
+successfully parsed snapshot. The archive displays upstream section provenance and links back
+to the curated source; the GPL-licensed README itself is not copied into this repository.
+Publication dates are year-granular because that is the precision consistently available in
+the source list.
+
 ### Finding reliable OpenAlex IDs
 
 Prefer IDs over names because author profiles can be conflated or fragmented:
@@ -175,6 +199,7 @@ After starting the service:
 - Default configured raw RSS: `http://localhost:3005/?rss`
 - Named feed reader: `http://localhost:3005/?feed=myfield`
 - Named feed raw RSS: `http://localhost:3005/?feed=myfield&rss`
+- Protein-design archive: `http://localhost:3005/?feed=protein-design-archive`
 - Multiple ad-hoc authors:
   `http://localhost:3005/?author_id=A5135542215&author_id=A5005023517`
 

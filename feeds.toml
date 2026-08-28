@@ -97,3 +97,8 @@ openalex_id = "A5058410619"
 [feeds.top-journals]
 title = "Top Journals"
 source_ids = ["S137773608", "S64187185"]  # Nature, Nature Communications
+
+[feeds.protein-design-archive]
+title = "Deep Learning for Protein Design"
+from = "1900-01-01"
+curated_sources = ["peldom-protein-design"]

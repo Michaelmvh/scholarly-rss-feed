@@ -27,6 +27,9 @@ pub struct FeedConfig {
     /// Canonical people with provider-specific identifiers.
     #[serde(default)]
     pub people: Vec<PersonConfig>,
+    /// Curated paper collections merged into this feed.
+    #[serde(default)]
+    pub curated_sources: Vec<String>,
     /// Legacy OpenAlex author IDs.
     #[serde(default)]
     pub author_ids: Vec<String>,

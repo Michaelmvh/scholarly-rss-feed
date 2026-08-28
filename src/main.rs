@@ -1,4 +1,5 @@
 mod config;
+mod curated;
 mod google_scholar;
 mod openalex;
 mod reader;
@@ -107,6 +108,7 @@ type FeedCacheKey = (
     Vec<String>,
     Vec<String>,
     Vec<String>,
+    Vec<String>,
     String,
     Vec<String>,
 );
@@ -121,6 +123,8 @@ struct FeedRequest {
     author_ids: Vec<String>,
     /// Author names queried by the archived Google Scholar provider.
     google_scholar_authors: Vec<String>,
+    /// Curated paper collections included in the feed.
+    curated_sources: Vec<String>,
     /// Normalized, deduped, sorted OpenAlex source (journal) ids.
     source_ids: Vec<String>,
     /// Earliest publication date (YYYY-MM-DD).
@@ -137,6 +141,7 @@ impl FeedRequest {
             self.provider,
             self.author_ids.clone(),
             self.google_scholar_authors.clone(),
+            self.curated_sources.clone(),
             self.source_ids.clone(),
             self.from.clone(),
             self.topics.clone(),
@@ -399,6 +404,10 @@ async fn resolve_feed_request(
     let from = adhoc_from
         .or_else(|| feed.from.clone())
         .unwrap_or_else(|| default_from_date(config.settings.from_days));
+    let mut curated_sources = feed.curated_sources.clone();
+    curated_sources.sort();
+    curated_sources.dedup();
+    curated::validate_sources(&curated_sources).map_err(ResolveFeedError::InvalidRequest)?;
 
     if provider == Provider::GoogleScholar {
         let mut google_scholar_authors = feed
@@ -419,10 +428,11 @@ async fn resolve_feed_request(
         google_scholar_authors.sort();
         google_scholar_authors.dedup();
 
-        if google_scholar_authors.is_empty() {
+        if google_scholar_authors.is_empty() && curated_sources.is_empty() {
             return Err(ResolveFeedError::InvalidRequest(
                 "The Google Scholar provider requires at least one \
-                 people entry, legacy google_scholar_authors entry, or ?author= parameter."
+                 people entry, legacy google_scholar_authors entry, ?author= parameter, \
+                 or curated source."
                     .to_string(),
             ));
         }
@@ -431,6 +441,7 @@ async fn resolve_feed_request(
             provider,
             author_ids: Vec::new(),
             google_scholar_authors,
+            curated_sources,
             source_ids: Vec::new(),
             from,
             topics: Vec::new(),
@@ -511,7 +522,7 @@ async fn resolve_feed_request(
     source_ids.dedup();
 
     // A feed needs at least one author or journal to produce anything.
-    if author_ids.is_empty() && source_ids.is_empty() {
+    if author_ids.is_empty() && source_ids.is_empty() && curated_sources.is_empty() {
         return Ok(None);
     }
 
@@ -529,6 +540,7 @@ async fn resolve_feed_request(
         provider,
         author_ids,
         google_scholar_authors: Vec::new(),
+        curated_sources,
         source_ids,
         from,
         topics,
@@ -712,9 +724,10 @@ fn find_cached(key: &FeedCacheKey) -> Option<GeneratedFeed> {
 
 async fn build_feed(request: &FeedRequest) -> Result<GeneratedFeed, String> {
     println!(
-        "Building RSS channel for authors [{}] journals [{}] from {}",
+        "Building RSS channel for authors [{}] journals [{}] curated sources [{}] from {}",
         request.author_ids.join(", "),
         request.source_ids.join(", "),
+        request.curated_sources.join(", "),
         request.from
     );
 
@@ -771,12 +784,18 @@ fn channel_metadata(request: &FeedRequest) -> (String, String) {
         Provider::GoogleScholar => request.google_scholar_authors.len(),
     };
     let journals = request.source_ids.len();
-
-    let subject = match (authors, journals) {
-        (a, 0) => format!("{a} author(s)"),
-        (0, j) => format!("{j} journal(s)"),
-        (a, j) => format!("{a} author(s) and {j} journal(s)"),
-    };
+    let curated_sources = request.curated_sources.len();
+    let mut subjects = Vec::new();
+    if authors > 0 {
+        subjects.push(format!("{authors} author(s)"));
+    }
+    if journals > 0 {
+        subjects.push(format!("{journals} journal(s)"));
+    }
+    if curated_sources > 0 {
+        subjects.push(format!("{curated_sources} curated source(s)"));
+    }
+    let subject = subjects.join(" and ");
 
     let title = format!("Recent publications ({subject})");
     let description =
@@ -785,6 +804,14 @@ fn channel_metadata(request: &FeedRequest) -> (String, String) {
 }
 
 async fn fetch_works(request: &FeedRequest) -> Result<Vec<Work>, String> {
+    let (provider_works, curated_works) = tokio::join!(
+        fetch_provider_works(request),
+        curated::fetch_sources(&CLIENT, &request.curated_sources, &request.from),
+    );
+    Ok(merge_works(provider_works?, curated_works?))
+}
+
+async fn fetch_provider_works(request: &FeedRequest) -> Result<Vec<Work>, String> {
     match request.provider {
         Provider::OpenAlex => fetch_openalex_works(request).await,
         Provider::GoogleScholar => {
@@ -794,7 +821,7 @@ async fn fetch_works(request: &FeedRequest) -> Result<Vec<Work>, String> {
                 &request.from,
             )
             .await?;
-            Ok(merge_works(works, Vec::new()))
+            Ok(works)
         }
     }
 }
@@ -1072,6 +1099,14 @@ fn merge_work_version(existing: &mut Work, mut candidate: Work) {
     matched_author_names.append(&mut candidate.matched_author_names);
     matched_author_names.sort();
     matched_author_names.dedup();
+    let mut curated_sources = std::mem::take(&mut existing.curated_sources);
+    curated_sources.append(&mut candidate.curated_sources);
+    curated_sources.sort_by(|left, right| (&left.name, &left.url).cmp(&(&right.name, &right.url)));
+    curated_sources.dedup();
+    let mut curated_categories = std::mem::take(&mut existing.curated_categories);
+    curated_categories.append(&mut candidate.curated_categories);
+    curated_categories.sort();
+    curated_categories.dedup();
 
     if version_quality(&candidate) > version_quality(existing) {
         std::mem::swap(existing, &mut candidate);
@@ -1088,6 +1123,8 @@ fn merge_work_version(existing: &mut Work, mut candidate: Work) {
     alternate_links.dedup();
     existing.alternate_links = alternate_links;
     existing.matched_author_names = matched_author_names;
+    existing.curated_sources = curated_sources;
+    existing.curated_categories = curated_categories;
 }
 
 fn version_quality(work: &Work) -> (bool, bool, bool, &str) {
@@ -1180,11 +1217,37 @@ fn work_to_item(work: &Work) -> rss::Item {
         });
     }
 
+    if !work.curated_sources.is_empty() {
+        let sources = work
+            .curated_sources
+            .iter()
+            .map(|source| format!("{} ({})", source.name, source.url))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let provenance = format!("Curated by: {sources}");
+        description = Some(match description {
+            Some(current) => format!("{current}\n{provenance}"),
+            None => provenance,
+        });
+    }
+
     let author_names = work.author_names();
     let dublin_core = (!author_names.is_empty()).then(|| DublinCoreExtension {
         creators: author_names,
         ..DublinCoreExtension::default()
     });
+    let category_domain = work
+        .curated_sources
+        .first()
+        .map(|source| source.url.clone());
+    let categories = work
+        .curated_categories
+        .iter()
+        .map(|name| Category {
+            name: name.clone(),
+            domain: category_domain.clone(),
+        })
+        .collect::<Vec<_>>();
 
     ItemBuilder::default()
         .title(Some(work.best_title()))
@@ -1194,6 +1257,7 @@ fn work_to_item(work: &Work) -> rss::Item {
         .source(source)
         .pub_date(work.publication_date.as_deref().and_then(to_rfc2822))
         .dublin_core_ext(dublin_core)
+        .categories(categories)
         .content(work.abstract_text())
         .build()
 }
@@ -1239,6 +1303,15 @@ fn work_to_publication(work: &Work) -> reader::Publication {
         venue: work.venue(),
         authors,
         abstract_text: work.abstract_text(),
+        curated_sources: work
+            .curated_sources
+            .iter()
+            .map(|source| reader::Attribution {
+                name: source.name.clone(),
+                url: source.url.clone(),
+            })
+            .collect(),
+        curated_categories: work.curated_categories.clone(),
     }
 }
 
@@ -1703,5 +1776,29 @@ name = "Scholar only"
         assert_eq!(request.provider, Provider::OpenAlex);
         assert_eq!(request.author_ids, vec!["A5016342562"]);
         assert!(request.google_scholar_authors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn curated_only_archive_resolves_without_provider_authors() {
+        let config: Config = toml::from_str(
+            r#"
+[feeds.protein-design-archive]
+title = "Deep Learning for Protein Design"
+from = "1900-01-01"
+curated_sources = ["peldom-protein-design"]
+"#,
+        )
+        .unwrap();
+        let params = vec![("feed".to_string(), "protein-design-archive".to_string())];
+
+        let request = resolve_feed_request(&params, &config, Provider::OpenAlex)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(request.author_ids.is_empty());
+        assert!(request.source_ids.is_empty());
+        assert_eq!(request.curated_sources, vec!["peldom-protein-design"]);
+        assert_eq!(request.from, "1900-01-01");
     }
 }

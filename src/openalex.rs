@@ -4,7 +4,7 @@ use std::collections::HashMap;
 pub const API_BASE: &str = "https://api.openalex.org";
 
 /// A single author record from `/authors`.
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct Author {
     pub id: Option<String>,
     pub display_name: Option<String>,
@@ -28,7 +28,7 @@ pub struct SourcesResponse {
 }
 
 /// A single work record from `/works`.
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct Work {
     pub id: Option<String>,
     pub doi: Option<String>,
@@ -46,15 +46,25 @@ pub struct Work {
     pub alternate_links: Vec<String>,
     #[serde(skip)]
     pub matched_author_names: Vec<String>,
+    #[serde(skip)]
+    pub curated_sources: Vec<CuratedSource>,
+    #[serde(skip)]
+    pub curated_categories: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CuratedSource {
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 pub struct Authorship {
     pub author: Option<Author>,
     pub raw_author_name: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct Location {
     pub landing_page_url: Option<String>,
     pub pdf_url: Option<String>,
@@ -62,7 +72,7 @@ pub struct Location {
     pub version: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct Source {
     pub display_name: Option<String>,
 }
