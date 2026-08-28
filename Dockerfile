@@ -31,6 +31,7 @@ EXPOSE 3005
 
 # Use the baked config by default; a host bind mount can override this path.
 ENV GSRF_CONFIG=/config/feeds.toml
+ENV GSRF_CACHE_DIR=/cache
 
 # Bind to all interfaces so the feed is reachable outside the container.
 CMD ["scholarly-rss-feed", "0.0.0.0:3005"]

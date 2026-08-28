@@ -3,6 +3,7 @@ use hyper::header::{ETAG, IF_NONE_MATCH};
 use hyper::StatusCode;
 use lazy_static::lazy_static;
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,6 +18,7 @@ const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MIN_EXPECTED_PAPERS: usize = 100;
 const REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const KNOWN_IRRELEVANT_IDS: &[&str] = &["arxiv:2602.23956"];
+const SNAPSHOT_FILE: &str = "peldom-snapshot.json";
 
 lazy_static! {
     static ref PELDOM_SNAPSHOT: Arc<RwLock<Option<Snapshot>>> = Arc::new(RwLock::new(None));
@@ -31,7 +33,7 @@ struct Snapshot {
     diagnostics: SourceDiagnostics,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SourceDiagnostics {
     pub source_name: String,
     pub entries_seen: usize,
@@ -40,6 +42,13 @@ pub struct SourceDiagnostics {
     pub irrelevant: usize,
     pub unavailable: usize,
     pub missing_stable_id: usize,
+}
+
+#[derive(Deserialize, Serialize)]
+struct PersistedSnapshot {
+    etag: Option<String>,
+    works: Vec<Work>,
+    diagnostics: SourceDiagnostics,
 }
 
 #[derive(Clone, Debug)]
@@ -124,9 +133,15 @@ async fn fetch_peldom(client: &reqwest::Client) -> Result<Snapshot, String> {
         return Ok(snapshot);
     }
 
-    let cached = PELDOM_SNAPSHOT.read().clone();
+    let cached = PELDOM_SNAPSHOT
+        .read()
+        .clone()
+        .or_else(load_persisted_snapshot);
     match refresh_peldom(client, cached.as_ref()).await {
         Ok(snapshot) => {
+            if let Err(error) = persist_snapshot(&snapshot) {
+                eprintln!("{error}");
+            }
             *PELDOM_SNAPSHOT.write() = Some(snapshot.clone());
             Ok(snapshot)
         }
@@ -140,6 +155,42 @@ async fn fetch_peldom(client: &reqwest::Client) -> Result<Snapshot, String> {
             None => Err(error),
         },
     }
+}
+
+fn load_persisted_snapshot() -> Option<Snapshot> {
+    match crate::snapshot_store::load::<PersistedSnapshot>(SNAPSHOT_FILE) {
+        Ok(Some(snapshot)) if snapshot.works.len() >= MIN_EXPECTED_PAPERS => Some(Snapshot {
+            etag: snapshot.etag,
+            checked_at: Instant::now()
+                .checked_sub(REFRESH_INTERVAL)
+                .unwrap_or_else(Instant::now),
+            works: snapshot.works,
+            diagnostics: snapshot.diagnostics,
+        }),
+        Ok(Some(snapshot)) => {
+            eprintln!(
+                "Ignoring persisted Peldom snapshot with only {} papers",
+                snapshot.works.len()
+            );
+            None
+        }
+        Ok(None) => None,
+        Err(error) => {
+            eprintln!("{error}");
+            None
+        }
+    }
+}
+
+fn persist_snapshot(snapshot: &Snapshot) -> Result<(), String> {
+    crate::snapshot_store::save(
+        SNAPSHOT_FILE,
+        &PersistedSnapshot {
+            etag: snapshot.etag.clone(),
+            works: snapshot.works.clone(),
+            diagnostics: snapshot.diagnostics.clone(),
+        },
+    )
 }
 
 fn fresh_snapshot() -> Option<Snapshot> {

@@ -72,6 +72,12 @@ pub(crate) fn version_keys(work: &Work) -> Vec<VersionKey> {
             keys.push(VersionKey::Doi(doi));
         }
     }
+    if let Some(arxiv_id) = work.id.as_deref().and_then(|id| id.strip_prefix("arxiv:")) {
+        keys.push(VersionKey::Doi(format!(
+            "10.48550/arxiv.{}",
+            arxiv_id.to_ascii_lowercase()
+        )));
+    }
 
     let title = work
         .title
@@ -237,6 +243,10 @@ fn normalize_title(title: &str) -> String {
 }
 
 fn merge_work_version(existing: &mut Work, mut candidate: Work) {
+    let collection_date = existing
+        .collection_date
+        .take()
+        .or_else(|| candidate.collection_date.take());
     let mut matched_author_names = std::mem::take(&mut existing.matched_author_names);
     matched_author_names.append(&mut candidate.matched_author_names);
     matched_author_names.sort();
@@ -264,6 +274,7 @@ fn merge_work_version(existing: &mut Work, mut candidate: Work) {
     alternate_links.sort();
     alternate_links.dedup();
     existing.alternate_links = alternate_links;
+    existing.collection_date = collection_date;
     existing.matched_author_names = matched_author_names;
     existing.curated_sources = curated_sources;
     existing.curated_categories = curated_categories;
@@ -356,5 +367,57 @@ mod tests {
         mark_authors_by_name(&mut works, &["David Baker".to_string()]);
 
         assert!(works[0].matched_author_names.is_empty());
+    }
+
+    #[test]
+    fn merges_curated_arxiv_record_with_its_openalex_doi() {
+        let enriched: Work = serde_json::from_value(serde_json::json!({
+            "id": "https://openalex.org/W1",
+            "doi": "https://doi.org/10.48550/arxiv.2605.26690",
+            "title": "A title",
+            "authorships": [{"author": {"display_name": "John Smith"}}]
+        }))
+        .unwrap();
+        let curated: Work = serde_json::from_value(serde_json::json!({
+            "id": "arxiv:2605.26690",
+            "title": "A title",
+            "authorships": [{"author": {"display_name": "J. Smith"}}]
+        }))
+        .unwrap();
+
+        let merged = merge_works(vec![enriched], vec![curated]);
+
+        assert_eq!(merged.len(), 1);
+    }
+
+    #[test]
+    fn preserves_collection_date_when_enriched_version_wins() {
+        let enriched: Work = serde_json::from_value(serde_json::json!({
+            "id": "https://openalex.org/W1",
+            "doi": "https://doi.org/10.1000/example",
+            "publication_date": "2026-01-02",
+            "abstract_inverted_index": {"Abstract": [0]}
+        }))
+        .unwrap();
+        let mut curated: Work = serde_json::from_value(serde_json::json!({
+            "id": "doi:10.1000/example",
+            "doi": "https://doi.org/10.1000/example"
+        }))
+        .unwrap();
+        curated.collection_date = Some(crate::openalex::CollectionDate {
+            date: "2025-05-03".to_string(),
+            commit_url: "https://github.com/example/repo/commit/abc".to_string(),
+        });
+
+        let merged = merge_works(vec![enriched], vec![curated]);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0]
+                .collection_date
+                .as_ref()
+                .map(|date| date.date.as_str()),
+            Some("2025-05-03")
+        );
     }
 }

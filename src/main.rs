@@ -4,7 +4,9 @@ mod evaluation;
 mod github_history;
 mod google_scholar;
 mod openalex;
+mod openalex_enrichment;
 mod reader;
+mod snapshot_store;
 mod works;
 
 use crate::config::{Config, FeedConfig};
@@ -939,7 +941,21 @@ async fn fetch_works(request: &FeedRequest) -> Result<Vec<Work>, String> {
         fetch_provider_works(request),
         curated::fetch_sources(&CLIENT, &request.curated_sources, &request.from),
     );
-    let mut works = merge_works(provider_works?, curated_works?);
+    let provider_works = provider_works?;
+    let mut curated_works = curated_works?;
+    if request.provider == Provider::OpenAlex && !curated_works.is_empty() {
+        curated_works =
+            match openalex_enrichment::enrich(&CLIENT, curated_works.clone(), mailto().as_deref())
+                .await
+            {
+                Ok(works) => works,
+                Err(error) => {
+                    eprintln!("{error}; serving curated records without OpenAlex enrichment");
+                    curated_works
+                }
+            };
+    }
+    let mut works = merge_works(provider_works, curated_works);
     mark_authors_by_name(&mut works, &request.tracked_author_names);
     Ok(works)
 }

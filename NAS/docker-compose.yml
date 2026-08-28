@@ -7,6 +7,9 @@ services:
     environment:
       - GSRF_MAILTO=${GSRF_MAILTO}
       - GSRF_PROVIDER=${GSRF_PROVIDER:-openalex}
+      - GSRF_CACHE_DIR=/cache
+    volumes:
+      - scholar-rss-cache:/cache
     expose:
       - "3005"
     restart: unless-stopped
@@ -20,3 +23,6 @@ services:
     depends_on:
       - scholar-rss
     restart: unless-stopped
+
+volumes:
+  scholar-rss-cache:

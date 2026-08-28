@@ -125,10 +125,10 @@ an abstract, then published status, then the newest date. Links to the other ver
 included in the retained item's description. Records whose titles or author lists cannot be
 compared are kept separate rather than risking a false match.
 
-The config is read on every request. Identical resolved queries are cached for up to one hour,
-so restarting the application clears the cache immediately. In Docker, changing the repository
-copy of `feeds.toml` requires publishing and deploying a new image because the file is baked
-into that image.
+The config is read on every request. Identical resolved queries are cached for up to one hour.
+Restarting clears generated feeds and in-memory provider data, while the curated source snapshot
+survives through `GSRF_CACHE_DIR`. In Docker, changing the repository copy of `feeds.toml`
+requires publishing and deploying a new image because the file is baked into that image.
 
 ### Switching providers
 
@@ -181,7 +181,9 @@ Curated ingestion includes entries with an explicit DOI, bioRxiv DOI (`10.1101` 
 `10.64898`), or arXiv ID.
 Entries without a stable identifier and entries marked unavailable are skipped. Benchmarks and
 datasets (section 0), small-molecule models (section 7.3), and unclassified commercial reports
-(section 7.5) are intentionally excluded.
+(section 7.5) remain intentionally excluded after Phase 4 review. No-ID entries are not matched
+by title because an incorrect scholarly match is worse than an omitted record; selected entries
+may be added later only after manually verifying a DOI or arXiv identifier.
 
 The upstream Markdown is fetched at most once every 24 hours with conditional ETag requests,
 a 2 MiB response limit, and the shared provider timeouts. Invalid updates do not replace a
@@ -197,6 +199,16 @@ labels this fallback **Added to collection** and links to the commit; it is neve
 the publication date or emitted as the RSS publication date. The collection date can still
 qualify and sort an otherwise undated paper within a recent feed. Blame metadata is fetched
 only when undated entries exist and is cached with the 24-hour curated-source snapshot.
+
+When OpenAlex is the active provider, curated DOI and arXiv identifiers are resolved in bounded
+batches to add canonical dates, abstracts, venues, open-access PDFs, and publication-version
+relationships. Matching uses stable identifiers only. If enrichment fails, the direct curated
+records remain available and the error is logged.
+
+Set `GSRF_CACHE_DIR` to persist the complete parsed source snapshot, including collection-date
+provenance, across restarts. Docker uses `/cache`; both Compose files mount the
+`scholar-rss-cache` named volume there. Snapshot replacement is atomic, malformed or undersized
+snapshots are rejected, and a network failure uses the last successfully parsed snapshot.
 
 Curated coverage can be evaluated independently of generated feed output:
 

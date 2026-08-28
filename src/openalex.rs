@@ -1,10 +1,10 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub const API_BASE: &str = "https://api.openalex.org";
 
 /// A single author record from `/authors`.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Author {
     pub id: Option<String>,
     pub display_name: Option<String>,
@@ -28,51 +28,51 @@ pub struct SourcesResponse {
 }
 
 /// A single work record from `/works`.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Work {
     pub id: Option<String>,
     pub doi: Option<String>,
     pub title: Option<String>,
     pub display_name: Option<String>,
     pub publication_date: Option<String>,
-    #[serde(skip)]
+    #[serde(default)]
     pub collection_date: Option<CollectionDate>,
     pub cited_by_count: Option<u64>,
     pub authorships: Option<Vec<Authorship>>,
     pub primary_location: Option<Location>,
     pub best_oa_location: Option<Location>,
     pub abstract_inverted_index: Option<HashMap<String, Vec<u32>>>,
-    #[serde(skip)]
+    #[serde(default)]
     pub abstract_text_override: Option<String>,
     #[serde(default)]
     pub alternate_links: Vec<String>,
-    #[serde(skip)]
+    #[serde(default)]
     pub matched_author_names: Vec<String>,
-    #[serde(skip)]
+    #[serde(default)]
     pub curated_sources: Vec<CuratedSource>,
-    #[serde(skip)]
+    #[serde(default)]
     pub curated_categories: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct CuratedSource {
     pub name: String,
     pub url: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct CollectionDate {
     pub date: String,
     pub commit_url: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Authorship {
     pub author: Option<Author>,
     pub raw_author_name: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Location {
     pub landing_page_url: Option<String>,
     pub pdf_url: Option<String>,
@@ -80,7 +80,7 @@ pub struct Location {
     pub version: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Source {
     pub display_name: Option<String>,
 }
