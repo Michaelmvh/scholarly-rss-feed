@@ -26,6 +26,23 @@ struct Snapshot {
     etag: Option<String>,
     checked_at: Instant,
     works: Vec<Work>,
+    diagnostics: SourceDiagnostics,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SourceDiagnostics {
+    pub source_name: String,
+    pub entries_seen: usize,
+    pub accepted: usize,
+    pub excluded_section: usize,
+    pub unavailable: usize,
+    pub missing_stable_id: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct SourceEvaluation {
+    pub works: Vec<Work>,
+    pub diagnostics: Vec<SourceDiagnostics>,
 }
 
 pub fn validate_sources(source_names: &[String]) -> Result<(), String> {
@@ -42,13 +59,26 @@ pub async fn fetch_sources(
     source_names: &[String],
     from: &str,
 ) -> Result<Vec<Work>, String> {
+    Ok(fetch_sources_for_evaluation(client, source_names, from)
+        .await?
+        .works)
+}
+
+pub async fn fetch_sources_for_evaluation(
+    client: &reqwest::Client,
+    source_names: &[String],
+    from: &str,
+) -> Result<SourceEvaluation, String> {
     validate_sources(source_names)?;
     let mut works = Vec::new();
+    let mut diagnostics = Vec::new();
 
     for source_name in source_names {
         match source_name.as_str() {
             PELDOM_PROTEIN_DESIGN => {
-                works.extend(fetch_peldom(client).await?);
+                let snapshot = fetch_peldom(client).await?;
+                works.extend(snapshot.works);
+                diagnostics.push(snapshot.diagnostics);
             }
             _ => unreachable!("curated sources were validated"),
         }
@@ -56,7 +86,7 @@ pub async fn fetch_sources(
 
     filter_from(&mut works, from);
 
-    Ok(works)
+    Ok(SourceEvaluation { works, diagnostics })
 }
 
 fn filter_from(works: &mut Vec<Work>, from: &str) {
@@ -76,30 +106,28 @@ fn filter_from(works: &mut Vec<Work>, from: &str) {
     });
 }
 
-async fn fetch_peldom(client: &reqwest::Client) -> Result<Vec<Work>, String> {
+async fn fetch_peldom(client: &reqwest::Client) -> Result<Snapshot, String> {
     if let Some(snapshot) = fresh_snapshot() {
-        return Ok(snapshot.works);
+        return Ok(snapshot);
     }
 
     let _refresh_guard = PELDOM_REFRESH.lock().await;
     if let Some(snapshot) = fresh_snapshot() {
-        return Ok(snapshot.works);
+        return Ok(snapshot);
     }
 
     let cached = PELDOM_SNAPSHOT.read().clone();
     match refresh_peldom(client, cached.as_ref()).await {
         Ok(snapshot) => {
-            let works = snapshot.works.clone();
-            *PELDOM_SNAPSHOT.write() = Some(snapshot);
-            Ok(works)
+            *PELDOM_SNAPSHOT.write() = Some(snapshot.clone());
+            Ok(snapshot)
         }
         Err(error) => match cached {
             Some(mut snapshot) => {
                 eprintln!("{error}; using the last successfully parsed Peldom snapshot");
                 snapshot.checked_at = Instant::now();
-                let works = snapshot.works.clone();
-                *PELDOM_SNAPSHOT.write() = Some(snapshot);
-                Ok(works)
+                *PELDOM_SNAPSHOT.write() = Some(snapshot.clone());
+                Ok(snapshot)
             }
             None => Err(error),
         },
@@ -166,7 +194,7 @@ async fn refresh_peldom(
     }
     let markdown = String::from_utf8(body)
         .map_err(|error| format!("Peldom source was not valid UTF-8: {error}"))?;
-    let works = parse_peldom(&markdown)?;
+    let (works, diagnostics) = parse_peldom_with_diagnostics(&markdown)?;
     if works.len() < MIN_EXPECTED_PAPERS {
         return Err(format!(
             "Peldom parser found only {} stable-ID papers; expected at least {MIN_EXPECTED_PAPERS}",
@@ -178,30 +206,36 @@ async fn refresh_peldom(
         etag,
         checked_at: Instant::now(),
         works,
+        diagnostics,
     })
 }
 
-fn parse_peldom(markdown: &str) -> Result<Vec<Work>, String> {
+fn parse_peldom_with_diagnostics(markdown: &str) -> Result<(Vec<Work>, SourceDiagnostics), String> {
     let mut section: Option<String> = None;
     let mut subsection: Option<String> = None;
     let mut pending: Option<PendingPaper> = None;
     let mut works = Vec::new();
+    let mut diagnostics = SourceDiagnostics {
+        source_name: PELDOM_PROTEIN_DESIGN.to_string(),
+        ..SourceDiagnostics::default()
+    };
 
     for line in markdown.lines() {
         let trimmed = line.trim();
         if let Some(heading) = trimmed.strip_prefix("## ") {
-            finish_pending(&mut pending, &mut works);
+            finish_pending(&mut pending, &mut works, &mut diagnostics);
             section = Some(heading.trim().to_string());
             subsection = None;
             continue;
         }
         if let Some(heading) = trimmed.strip_prefix("### ") {
-            finish_pending(&mut pending, &mut works);
+            finish_pending(&mut pending, &mut works, &mut diagnostics);
             subsection = Some(heading.trim().to_string());
             continue;
         }
         if let Some(title) = paper_title(trimmed) {
-            finish_pending(&mut pending, &mut works);
+            finish_pending(&mut pending, &mut works, &mut diagnostics);
+            diagnostics.entries_seen += 1;
             if included_section(section.as_deref(), subsection.as_deref()) {
                 pending = Some(PendingPaper {
                     title,
@@ -209,6 +243,8 @@ fn parse_peldom(markdown: &str) -> Result<Vec<Work>, String> {
                     subsection: subsection.clone(),
                     lines: Vec::new(),
                 });
+            } else {
+                diagnostics.excluded_section += 1;
             }
             continue;
         }
@@ -216,12 +252,13 @@ fn parse_peldom(markdown: &str) -> Result<Vec<Work>, String> {
             paper.lines.push(trimmed.to_string());
         }
     }
-    finish_pending(&mut pending, &mut works);
+    finish_pending(&mut pending, &mut works, &mut diagnostics);
 
     if works.is_empty() {
         return Err("Peldom document contained no recognizable stable-ID papers".to_string());
     }
-    Ok(works)
+    diagnostics.accepted = works.len();
+    Ok((works, diagnostics))
 }
 
 struct PendingPaper {
@@ -231,7 +268,11 @@ struct PendingPaper {
     lines: Vec<String>,
 }
 
-fn finish_pending(pending: &mut Option<PendingPaper>, works: &mut Vec<Work>) {
+fn finish_pending(
+    pending: &mut Option<PendingPaper>,
+    works: &mut Vec<Work>,
+    diagnostics: &mut SourceDiagnostics,
+) {
     let Some(paper) = pending.take() else {
         return;
     };
@@ -240,10 +281,12 @@ fn finish_pending(pending: &mut Option<PendingPaper>, works: &mut Vec<Work>) {
         .iter()
         .any(|line| line.to_ascii_lowercase().contains("paper unavailable"))
     {
+        diagnostics.unavailable += 1;
         return;
     }
-    if let Some(work) = paper.into_work() {
-        works.push(work);
+    match paper.into_work() {
+        Some(work) => works.push(work),
+        None => diagnostics.missing_stable_id += 1,
     }
 }
 
@@ -521,13 +564,23 @@ fn looks_like_initials(name: &str) -> bool {
 }
 
 fn find_year(line: &str) -> Option<u16> {
-    line.split(|character: char| !character.is_ascii_digit())
+    let explicit_year = line
+        .split(|character: char| !character.is_ascii_digit())
         .find_map(|part| {
             (part.len() == 4)
                 .then(|| part.parse::<u16>().ok())
                 .flatten()
-                .filter(|year| (1900..=2999).contains(year))
-        })
+                .filter(|year| (1900..=2099).contains(year))
+        });
+    explicit_year.or_else(|| {
+        let lowercase = line.to_ascii_lowercase();
+        let marker = ["arxiv:", "arxiv.org/abs/"]
+            .into_iter()
+            .find_map(|marker| lowercase.find(marker).map(|start| (marker, start)))?;
+        let start = marker.1 + marker.0.len();
+        let year = lowercase.get(start..start + 2)?.parse::<u16>().ok()?;
+        Some(2000 + year)
+    })
 }
 
 #[cfg(test)]
@@ -580,9 +633,20 @@ Example Author
 
     #[test]
     fn parses_only_stable_ids_from_included_sections() {
-        let works = parse_peldom(FIXTURE).unwrap();
+        let (works, diagnostics) = parse_peldom_with_diagnostics(FIXTURE).unwrap();
 
         assert_eq!(works.len(), 3);
+        assert_eq!(
+            diagnostics,
+            SourceDiagnostics {
+                source_name: PELDOM_PROTEIN_DESIGN.to_string(),
+                entries_seen: 7,
+                accepted: 3,
+                excluded_section: 2,
+                unavailable: 1,
+                missing_stable_id: 1,
+            }
+        );
         assert_eq!(
             works[0].id.as_deref(),
             Some("doi:10.64898/2026.05.06.723381")
@@ -621,8 +685,24 @@ Example Author
     }
 
     #[test]
+    fn extracts_arxiv_year_without_treating_year_month_as_a_future_year() {
+        assert_eq!(
+            find_year("[arXiv:2208.13616v2](https://arxiv.org/abs/2208.13616v2)"),
+            Some(2022)
+        );
+        assert_eq!(
+            find_year("[arXiv:2511.12345](https://arxiv.org/abs/2511.12345)"),
+            Some(2025)
+        );
+        assert_eq!(
+            find_year("[Journal 2026](https://example.com/2208.13616)"),
+            Some(2026)
+        );
+    }
+
+    #[test]
     fn rejects_documents_without_recognizable_papers() {
-        assert!(parse_peldom("# unexpected content").is_err());
+        assert!(parse_peldom_with_diagnostics("# unexpected content").is_err());
     }
 
     #[test]
@@ -633,7 +713,7 @@ Example Author
 
     #[test]
     fn full_archive_keeps_undated_stable_id_papers() {
-        let mut works = parse_peldom(FIXTURE).unwrap();
+        let mut works = parse_peldom_with_diagnostics(FIXTURE).unwrap().0;
 
         filter_from(&mut works, "1900-01-01");
         assert!(works.iter().any(|work| work.publication_date.is_none()));

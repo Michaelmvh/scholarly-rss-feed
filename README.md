@@ -178,6 +178,19 @@ to the curated source; the GPL-licensed README itself is not copied into this re
 Publication dates are year-granular because that is the precision consistently available in
 the source list.
 
+Phase 2 can be evaluated without adding curated papers to the default feed:
+
+```sh
+cargo run -- --compare-curated bioml peldom-protein-design --config feeds.toml
+```
+
+The command fetches the configured feed from the selected provider and compares it with recent
+curated papers using the feed's normal cutoff. Its Markdown report includes DOI and
+title/author overlap, unique curated discoveries, version-merged volume, metadata gaps,
+provider enrichment opportunities, section distribution, and all-time parser exclusions. It
+does not modify configuration or feed output. Set `GSRF_PROVIDER` to compare against the
+explicit Google Scholar fallback instead of OpenAlex.
+
 ### Finding reliable OpenAlex IDs
 
 Prefer IDs over names because author profiles can be conflated or fragmented:

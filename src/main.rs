@@ -1,5 +1,6 @@
 mod config;
 mod curated;
+mod evaluation;
 mod google_scholar;
 mod openalex;
 mod reader;
@@ -103,6 +104,17 @@ struct GeneratedFeed {
     reader: reader::Feed,
 }
 
+struct CliArgs {
+    address: String,
+    config_path: PathBuf,
+    comparison: Option<ComparisonArgs>,
+}
+
+struct ComparisonArgs {
+    feed_name: String,
+    source_name: String,
+}
+
 type FeedCacheKey = (
     Provider,
     Vec<String>,
@@ -151,13 +163,27 @@ impl FeedRequest {
 
 #[tokio::main]
 async fn main() {
-    let (address, config_path) = parse_cli_args();
-    CONFIG_PATH.set(config_path.clone()).ok();
+    let cli = match parse_cli_args_from(env::args().skip(1)) {
+        Ok(cli) => cli,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    };
+    CONFIG_PATH.set(cli.config_path.clone()).ok();
 
-    let addr = SocketAddr::from_str(&address).unwrap();
+    if let Some(comparison) = cli.comparison {
+        if let Err(error) = run_curated_comparison(&comparison, &cli.config_path).await {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
-    println!("Listening on {address}...");
-    println!("Using config file: {}", config_path.display());
+    let addr = SocketAddr::from_str(&cli.address).unwrap();
+
+    println!("Listening on {}...", cli.address);
+    println!("Using config file: {}", cli.config_path.display());
     let listener = TcpListener::bind(addr).await.unwrap();
 
     println!("Server started");
@@ -190,18 +216,42 @@ async fn main() {
 }
 
 /// Parse CLI args: first non-flag positional is the bind address, `--config <path>`
-/// (or env `GSRF_CONFIG`) selects the feeds config file.
-fn parse_cli_args() -> (String, PathBuf) {
+/// selects the feeds config file, and `--compare-curated <feed> <source>` runs
+/// an evaluation instead of the server.
+fn parse_cli_args_from(args: impl IntoIterator<Item = String>) -> Result<CliArgs, String> {
     let mut address: Option<String> = None;
     let mut config: Option<String> = None;
+    let mut comparison = None;
 
-    let mut args = env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--config" => config = args.next(),
+            "--config" => {
+                config = Some(
+                    args.next()
+                        .ok_or_else(|| "--config requires a path".to_string())?,
+                );
+            }
+            "--compare-curated" => {
+                let feed_name = args.next().ok_or_else(|| {
+                    "--compare-curated requires a feed name and curated source".to_string()
+                })?;
+                let source_name = args.next().ok_or_else(|| {
+                    "--compare-curated requires a feed name and curated source".to_string()
+                })?;
+                comparison = Some(ComparisonArgs {
+                    feed_name,
+                    source_name,
+                });
+            }
+            flag if flag.starts_with("--") => {
+                return Err(format!("Unknown option \"{flag}\"."));
+            }
             other => {
                 if address.is_none() {
                     address = Some(other.to_string());
+                } else {
+                    return Err(format!("Unexpected positional argument \"{other}\"."));
                 }
             }
         }
@@ -212,7 +262,60 @@ fn parse_cli_args() -> (String, PathBuf) {
         .or_else(|| env::var("GSRF_CONFIG").ok())
         .unwrap_or_else(|| "feeds.toml".to_string());
 
-    (address, PathBuf::from(config))
+    Ok(CliArgs {
+        address,
+        config_path: PathBuf::from(config),
+        comparison,
+    })
+}
+
+async fn run_curated_comparison(
+    comparison: &ComparisonArgs,
+    config_path: &std::path::Path,
+) -> Result<(), String> {
+    let config = Config::load(config_path);
+    let provider = Provider::configured()?;
+    let params = vec![("feed".to_string(), comparison.feed_name.clone())];
+    let request = resolve_feed_request(&params, &config, provider)
+        .await
+        .map_err(|error| match error {
+            ResolveFeedError::InvalidRequest(message) | ResolveFeedError::Provider(message) => {
+                message
+            }
+        })?
+        .ok_or_else(|| {
+            format!(
+                "Feed \"{}\" has no provider identifiers to compare.",
+                comparison.feed_name
+            )
+        })?;
+    curated::validate_sources(std::slice::from_ref(&comparison.source_name))?;
+
+    let (provider_works, curated_evaluation) = tokio::join!(
+        fetch_provider_works(&request),
+        curated::fetch_sources_for_evaluation(
+            &CLIENT,
+            std::slice::from_ref(&comparison.source_name),
+            &request.from,
+        ),
+    );
+    let provider_works = provider_works?;
+    let curated_evaluation = curated_evaluation?;
+    let report = evaluation::compare(
+        &provider_works,
+        &curated_evaluation.works,
+        curated_evaluation.diagnostics,
+    );
+    print!(
+        "{}",
+        report.render_markdown(
+            &comparison.feed_name,
+            &comparison.source_name,
+            &request.from,
+            provider.display_name(),
+        )
+    );
+    Ok(())
 }
 
 async fn serve_feed(request: Request<Incoming>) -> Result<Response<Full<Bytes>>, Error> {
@@ -892,7 +995,7 @@ fn mark_feed_authors(works: &mut [Work], feed_author_ids: &[String]) {
 /// A signature that identifies a work well enough to treat two records as versions of
 /// each other. Two works are grouped when *any* of their keys match.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-enum VersionKey {
+pub(crate) enum VersionKey {
     /// Identical DOIs always denote the same work.
     Doi(String),
     /// Normalized title plus the complete set of OpenAlex author ids.
@@ -904,7 +1007,7 @@ enum VersionKey {
 
 /// Merge two result sets, deduplicating exact OpenAlex records and grouping versions that
 /// share a DOI, or a normalized title together with the same author ids *or* author names.
-fn merge_works(primary: Vec<Work>, secondary: Vec<Work>) -> Vec<Work> {
+pub(crate) fn merge_works(primary: Vec<Work>, secondary: Vec<Work>) -> Vec<Work> {
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut version_groups: HashMap<VersionKey, usize> = HashMap::new();
     let mut works: Vec<Work> = Vec::new();
@@ -952,7 +1055,7 @@ fn merge_works(primary: Vec<Work>, secondary: Vec<Work>) -> Vec<Work> {
     works
 }
 
-fn version_keys(work: &Work) -> Vec<VersionKey> {
+pub(crate) fn version_keys(work: &Work) -> Vec<VersionKey> {
     let mut keys = Vec::new();
 
     if let Some(doi) = work.doi.as_deref().map(normalize_doi) {
@@ -1708,6 +1811,40 @@ mod tests {
             Provider::GoogleScholar
         );
         assert!(Provider::parse("unknown").is_err());
+    }
+
+    #[test]
+    fn parses_curated_comparison_cli_mode() {
+        let cli = parse_cli_args_from(
+            [
+                "--compare-curated",
+                "bioml",
+                "peldom-protein-design",
+                "--config",
+                "custom.toml",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+        let comparison = cli.comparison.unwrap();
+
+        assert_eq!(comparison.feed_name, "bioml");
+        assert_eq!(comparison.source_name, "peldom-protein-design");
+        assert_eq!(cli.config_path, PathBuf::from("custom.toml"));
+    }
+
+    #[test]
+    fn rejects_incomplete_curated_comparison_cli_mode() {
+        let error = parse_cli_args_from(
+            ["--compare-curated", "bioml"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .err()
+        .unwrap();
+
+        assert!(error.contains("requires a feed name and curated source"));
     }
 
     #[tokio::test]
