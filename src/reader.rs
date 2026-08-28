@@ -11,6 +11,7 @@ pub struct Publication {
     pub title: String,
     pub link: Option<String>,
     pub publication_date: Option<String>,
+    pub collection_date: Option<CollectionDate>,
     pub venue: Option<String>,
     pub authors: Vec<Author>,
     pub abstract_text: Option<String>,
@@ -28,6 +29,12 @@ pub struct Author {
 pub struct Attribution {
     pub name: String,
     pub url: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct CollectionDate {
+    pub date: String,
+    pub commit_url: String,
 }
 
 const STYLES: &str = r#"
@@ -214,6 +221,15 @@ fn render_metadata(publication: &Publication) -> (String, &'static str, String) 
         .as_deref()
         .map(format_reader_date)
         .map(|value| format!(r#"<time>{}</time>"#, escape_html(&value)))
+        .or_else(|| {
+            publication.collection_date.as_ref().map(|collection_date| {
+                let value = escape_html(&format_reader_date(&collection_date.date));
+                let commit_url = escape_html(&collection_date.commit_url);
+                format!(
+                    r#"Added to collection <a href="{commit_url}" rel="external"><time>{value}</time></a>"#
+                )
+            })
+        })
         .unwrap_or_default();
     let venue = publication
         .venue
@@ -352,6 +368,7 @@ mod tests {
                 title: "<script>alert('title')</script>".to_string(),
                 link: Some("https://example.com/?a=1&b=2".to_string()),
                 publication_date: Some("2026-08-27".to_string()),
+                collection_date: None,
                 venue: Some("Example & Journal".to_string()),
                 authors: vec![
                     Author {
@@ -413,5 +430,21 @@ mod tests {
         assert!(html.contains(
             r#"<strong class="notable-author">Ada Lovelace</strong>, <strong class="notable-author">Grace Hopper</strong>, Alan Turing"#
         ));
+    }
+
+    #[test]
+    fn labels_collection_date_without_presenting_it_as_publication_date() {
+        let mut feed = sample_feed();
+        feed.publications[0].publication_date = None;
+        feed.publications[0].collection_date = Some(CollectionDate {
+            date: "2025-05-03".to_string(),
+            commit_url: "https://github.com/example/repo/commit/abc".to_string(),
+        });
+
+        let html = render_feed(&feed, &[]);
+
+        assert!(html.contains("Added to collection"));
+        assert!(html.contains("<time>May 3, 2025</time>"));
+        assert!(html.contains("https://github.com/example/repo/commit/abc"));
     }
 }

@@ -48,13 +48,20 @@ pub(crate) fn merge_works(primary: Vec<Work>, secondary: Vec<Work>) -> Vec<Work>
         }
     }
 
-    works.sort_by(|left, right| {
-        let left_date = left.publication_date.as_deref().unwrap_or("");
-        let right_date = right.publication_date.as_deref().unwrap_or("");
-        right_date.cmp(left_date)
-    });
+    works.sort_by(|left, right| sort_date(right).cmp(sort_date(left)));
 
     works
+}
+
+fn sort_date(work: &Work) -> &str {
+    work.publication_date
+        .as_deref()
+        .or_else(|| {
+            work.collection_date
+                .as_ref()
+                .map(|collection_date| collection_date.date.as_str())
+        })
+        .unwrap_or("")
 }
 
 pub(crate) fn version_keys(work: &Work) -> Vec<VersionKey> {
@@ -289,6 +296,7 @@ mod tests {
             title: Some("Curated paper".to_string()),
             display_name: None,
             publication_date: Some("2026-01-01".to_string()),
+            collection_date: None,
             cited_by_count: None,
             authorships: Some(
                 names

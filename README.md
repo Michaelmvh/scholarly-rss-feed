@@ -191,6 +191,13 @@ Publication dates preserve the precision available in the source list: bioRxiv i
 provide an exact day, modern arXiv identifiers provide a year and month, and citations that
 only state a year use January 1 as an explicit year-only placeholder.
 
+If an accepted paper has no publication date, the service reads the public GitHub blame data
+for that paper's title line and records the associated commit date separately. The reader
+labels this fallback **Added to collection** and links to the commit; it is never presented as
+the publication date or emitted as the RSS publication date. The collection date can still
+qualify and sort an otherwise undated paper within a recent feed. Blame metadata is fetched
+only when undated entries exist and is cached with the 24-hour curated-source snapshot.
+
 Curated coverage can be evaluated independently of generated feed output:
 
 ```sh

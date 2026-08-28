@@ -1,6 +1,7 @@
 mod config;
 mod curated;
 mod evaluation;
+mod github_history;
 mod google_scholar;
 mod openalex;
 mod reader;
@@ -1110,6 +1111,19 @@ fn work_to_item(work: &Work) -> rss::Item {
         });
     }
 
+    if work.publication_date.is_none() {
+        if let Some(collection_date) = &work.collection_date {
+            let added = format!(
+                "Added to curated collection: {} ({})",
+                collection_date.date, collection_date.commit_url
+            );
+            description = Some(match description {
+                Some(current) => format!("{current}\n{added}"),
+                None => added,
+            });
+        }
+    }
+
     let author_names = work.author_names();
     let dublin_core = (!author_names.is_empty()).then(|| DublinCoreExtension {
         creators: author_names,
@@ -1179,6 +1193,12 @@ fn work_to_publication(work: &Work) -> reader::Publication {
         title: work.best_title(),
         link: work.best_link(),
         publication_date: work.publication_date.clone(),
+        collection_date: work.collection_date.as_ref().map(|collection_date| {
+            reader::CollectionDate {
+                date: collection_date.date.clone(),
+                commit_url: collection_date.commit_url.clone(),
+            }
+        }),
         venue: work.venue(),
         authors,
         abstract_text: work.abstract_text(),
@@ -1542,6 +1562,23 @@ mod tests {
             vec!["Ada Lovelace", "Grace Hopper"],
         );
         assert!(item.categories.is_empty());
+    }
+
+    #[test]
+    fn collection_date_is_descriptive_rss_metadata_not_pub_date() {
+        let mut work = work(Some("curated:1"), None);
+        work.collection_date = Some(crate::openalex::CollectionDate {
+            date: "2025-05-03".to_string(),
+            commit_url: "https://github.com/example/repo/commit/abc".to_string(),
+        });
+
+        let item = work_to_item(&work);
+
+        assert!(item.pub_date.is_none());
+        assert!(item.description.as_deref().is_some_and(|description| {
+            description.contains("Added to curated collection: 2025-05-03")
+                && description.contains("/commit/abc")
+        }));
     }
 
     #[test]

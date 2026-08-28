@@ -35,6 +35,8 @@ pub struct Work {
     pub title: Option<String>,
     pub display_name: Option<String>,
     pub publication_date: Option<String>,
+    #[serde(skip)]
+    pub collection_date: Option<CollectionDate>,
     pub cited_by_count: Option<u64>,
     pub authorships: Option<Vec<Authorship>>,
     pub primary_location: Option<Location>,
@@ -56,6 +58,12 @@ pub struct Work {
 pub struct CuratedSource {
     pub name: String,
     pub url: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CollectionDate {
+    pub date: String,
+    pub commit_url: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]

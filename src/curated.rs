@@ -3,6 +3,7 @@ use hyper::header::{ETAG, IF_NONE_MATCH};
 use hyper::StatusCode;
 use lazy_static::lazy_static;
 use parking_lot::RwLock;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -99,6 +100,11 @@ fn filter_from(works: &mut Vec<Work>, from: &str) {
         match work
             .publication_date
             .as_deref()
+            .or_else(|| {
+                work.collection_date
+                    .as_ref()
+                    .map(|collection_date| collection_date.date.as_str())
+            })
             .and_then(|date| date.get(..4))
             .and_then(|year| year.parse::<u16>().ok())
         {
@@ -196,12 +202,38 @@ async fn refresh_peldom(
     }
     let markdown = String::from_utf8(body)
         .map_err(|error| format!("Peldom source was not valid UTF-8: {error}"))?;
-    let (works, diagnostics) = parse_peldom_with_diagnostics(&markdown)?;
+    let (mut works, diagnostics) = parse_peldom_with_diagnostics(&markdown)?;
     if works.len() < MIN_EXPECTED_PAPERS {
         return Err(format!(
             "Peldom parser found only {} stable-ID papers; expected at least {MIN_EXPECTED_PAPERS}",
             works.len()
         ));
+    }
+    let undated_titles = works
+        .iter()
+        .filter(|work| work.publication_date.is_none())
+        .map(Work::best_title)
+        .collect::<HashSet<_>>();
+    match crate::github_history::fetch_collection_dates(client, &undated_titles).await {
+        Ok(collection_dates) => {
+            for work in &mut works {
+                if work.publication_date.is_none() {
+                    work.collection_date = collection_dates.get(&work.best_title()).cloned();
+                }
+            }
+            let unresolved = works
+                .iter()
+                .filter(|work| work.publication_date.is_none() && work.collection_date.is_none())
+                .count();
+            if unresolved > 0 {
+                eprintln!(
+                    "GitHub blame did not resolve collection dates for {unresolved} undated papers"
+                );
+            }
+        }
+        Err(error) => {
+            eprintln!("Could not enrich undated papers with collection dates: {error}");
+        }
     }
 
     Ok(Snapshot {
@@ -339,6 +371,7 @@ impl PendingPaper {
             title: Some(self.title),
             display_name: None,
             publication_date,
+            collection_date: None,
             cited_by_count: None,
             authorships: Some(
                 authors
@@ -771,8 +804,22 @@ Example Author
         filter_from(&mut works, "1900-01-01");
         assert!(works.iter().any(|work| work.publication_date.is_none()));
 
+        let undated = works
+            .iter_mut()
+            .find(|work| work.publication_date.is_none())
+            .unwrap();
+        undated.collection_date = Some(crate::openalex::CollectionDate {
+            date: "2025-05-03".to_string(),
+            commit_url: "https://example.com/commit".to_string(),
+        });
         filter_from(&mut works, "2025-01-01");
-        assert!(works.iter().all(|work| work.publication_date.is_some()));
+        assert!(works.iter().any(|work| {
+            work.publication_date.is_none()
+                && work
+                    .collection_date
+                    .as_ref()
+                    .is_some_and(|date| date.date == "2025-05-03")
+        }));
     }
 
     #[test]

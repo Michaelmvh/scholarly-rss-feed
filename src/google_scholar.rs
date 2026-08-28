@@ -229,6 +229,7 @@ fn result_to_work(result: ScholarResult, queried_author: &str) -> Work {
         title: Some(result.title),
         display_name: None,
         publication_date,
+        collection_date: None,
         cited_by_count: result.citations,
         authorships: Some(authorships),
         primary_location,
