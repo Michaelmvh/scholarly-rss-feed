@@ -1,6 +1,6 @@
 use crate::curated::SourceDiagnostics;
 use crate::openalex::Work;
-use crate::{merge_works, version_keys, VersionKey};
+use crate::works::{merge_works, version_keys, VersionKey};
 use std::collections::BTreeMap;
 
 const MAX_DISCOVERIES: usize = 20;
@@ -169,16 +169,17 @@ impl ComparisonReport {
 
         output.push_str("## Source ingestion\n\n");
         output.push_str(
-            "| Source | Entries | Accepted | Excluded section | Unavailable | No stable ID |\n",
+            "| Source | Entries | Accepted | Excluded section | Irrelevant | Unavailable | No stable ID |\n",
         );
-        output.push_str("|---|---:|---:|---:|---:|---:|\n");
+        output.push_str("|---|---:|---:|---:|---:|---:|---:|\n");
         for diagnostic in &self.diagnostics {
             output.push_str(&format!(
-                "| {} | {} | {} | {} | {} | {} |\n",
+                "| {} | {} | {} | {} | {} | {} | {} |\n",
                 diagnostic.source_name,
                 diagnostic.entries_seen,
                 diagnostic.accepted,
                 diagnostic.excluded_section,
+                diagnostic.irrelevant,
                 diagnostic.unavailable,
                 diagnostic.missing_stable_id,
             ));
@@ -314,6 +315,7 @@ mod tests {
             entries_seen: 10,
             accepted: 6,
             excluded_section: 2,
+            irrelevant: 0,
             unavailable: 1,
             missing_stable_id: 1,
         }];
@@ -325,7 +327,7 @@ mod tests {
 
         let markdown = report.render_markdown("bioml", "source", "2025-01-01", "OpenAlex");
 
-        assert!(markdown.contains("| source | 10 | 6 | 2 | 1 | 1 |"));
+        assert!(markdown.contains("| source | 10 | 6 | 2 | 0 | 1 | 1 |"));
         assert!(markdown.contains("| 3.4 Diffusion | 1 |"));
         assert!(markdown.contains("- 2026-01-01 — A | B"));
     }

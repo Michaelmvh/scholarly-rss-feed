@@ -15,6 +15,7 @@ const PELDOM_SOURCE_NAME: &str = "Papers for Protein Design Using Deep Learning"
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MIN_EXPECTED_PAPERS: usize = 100;
 const REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const KNOWN_IRRELEVANT_IDS: &[&str] = &["arxiv:2602.23956"];
 
 lazy_static! {
     static ref PELDOM_SNAPSHOT: Arc<RwLock<Option<Snapshot>>> = Arc::new(RwLock::new(None));
@@ -35,6 +36,7 @@ pub struct SourceDiagnostics {
     pub entries_seen: usize,
     pub accepted: usize,
     pub excluded_section: usize,
+    pub irrelevant: usize,
     pub unavailable: usize,
     pub missing_stable_id: usize,
 }
@@ -285,6 +287,14 @@ fn finish_pending(
         return;
     }
     match paper.into_work() {
+        Some(work)
+            if work
+                .id
+                .as_deref()
+                .is_some_and(|id| KNOWN_IRRELEVANT_IDS.contains(&id)) =>
+        {
+            diagnostics.irrelevant += 1;
+        }
         Some(work) => works.push(work),
         None => diagnostics.missing_stable_id += 1,
     }
@@ -312,8 +322,7 @@ impl PendingPaper {
         let publication_date = self
             .lines
             .iter()
-            .find_map(|line| find_year(line))
-            .map(|year| format!("{year}-01-01"));
+            .find_map(|line| find_publication_date(line));
         let source = venue.clone().map(|display_name| Source {
             display_name: Some(display_name),
         });
@@ -563,24 +572,54 @@ fn looks_like_initials(name: &str) -> bool {
             .all(|character| character.is_alphabetic() || ".- ".contains(character))
 }
 
-fn find_year(line: &str) -> Option<u16> {
-    let explicit_year = line
+fn find_publication_date(line: &str) -> Option<String> {
+    if let Some(date) = find_calendar_date(line) {
+        return Some(date);
+    }
+    if let Some(date) = find_arxiv_month(line) {
+        return Some(date);
+    }
+    find_explicit_year(line).map(|year| format!("{year}-01-01"))
+}
+
+fn find_calendar_date(line: &str) -> Option<String> {
+    let numeric_parts = line
         .split(|character: char| !character.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    numeric_parts.windows(3).find_map(|parts| {
+        if parts[0].len() != 4 {
+            return None;
+        }
+        let year = parts[0].parse::<i32>().ok()?;
+        let month = parts[1].parse::<u32>().ok()?;
+        let day = parts[2].parse::<u32>().ok()?;
+        let date = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
+        (1900..=2099)
+            .contains(&year)
+            .then(|| date.format("%Y-%m-%d").to_string())
+    })
+}
+
+fn find_arxiv_month(line: &str) -> Option<String> {
+    let lowercase = line.to_ascii_lowercase();
+    let (marker, marker_start) = ["arxiv:", "arxiv.org/abs/"]
+        .into_iter()
+        .find_map(|marker| lowercase.find(marker).map(|start| (marker, start)))?;
+    let start = marker_start + marker.len();
+    let year = 2000 + lowercase.get(start..start + 2)?.parse::<i32>().ok()?;
+    let month = lowercase.get(start + 2..start + 4)?.parse::<u32>().ok()?;
+    chrono::NaiveDate::from_ymd_opt(year, month, 1).map(|date| date.format("%Y-%m-%d").to_string())
+}
+
+fn find_explicit_year(line: &str) -> Option<u16> {
+    line.split(|character: char| !character.is_ascii_digit())
         .find_map(|part| {
             (part.len() == 4)
                 .then(|| part.parse::<u16>().ok())
                 .flatten()
                 .filter(|year| (1900..=2099).contains(year))
-        });
-    explicit_year.or_else(|| {
-        let lowercase = line.to_ascii_lowercase();
-        let marker = ["arxiv:", "arxiv.org/abs/"]
-            .into_iter()
-            .find_map(|marker| lowercase.find(marker).map(|start| (marker, start)))?;
-        let start = marker.1 + marker.0.len();
-        let year = lowercase.get(start..start + 2)?.parse::<u16>().ok()?;
-        Some(2000 + year)
-    })
+        })
 }
 
 #[cfg(test)]
@@ -609,6 +648,10 @@ Ada Lovelace, Grace Hopper
 **An arXiv paper**
 Alan Turing and Joan Clarke
 [arXiv:2602.04916](https://arxiv.org/abs/2602.04916v3)
+
+**Known irrelevant paper**
+Example Author
+[arXiv:2602.23956](https://arxiv.org/abs/2602.23956)
 
 **An undated DOI paper**
 Syrlybaeva, Raulia, and Eva-Maria Strauch
@@ -640,9 +683,10 @@ Example Author
             diagnostics,
             SourceDiagnostics {
                 source_name: PELDOM_PROTEIN_DESIGN.to_string(),
-                entries_seen: 7,
+                entries_seen: 8,
                 accepted: 3,
                 excluded_section: 2,
+                irrelevant: 1,
                 unavailable: 1,
                 missing_stable_id: 1,
             }
@@ -685,18 +729,27 @@ Example Author
     }
 
     #[test]
-    fn extracts_arxiv_year_without_treating_year_month_as_a_future_year() {
+    fn preserves_available_date_precision() {
         assert_eq!(
-            find_year("[arXiv:2208.13616v2](https://arxiv.org/abs/2208.13616v2)"),
-            Some(2022)
+            find_publication_date(
+                "[bioRxiv 2026.05.06.723381](https://www.biorxiv.org/content/10.64898/2026.05.06.723381v2)"
+            )
+            .as_deref(),
+            Some("2026-05-06")
         );
         assert_eq!(
-            find_year("[arXiv:2511.12345](https://arxiv.org/abs/2511.12345)"),
-            Some(2025)
+            find_publication_date("[arXiv:2208.13616v2](https://arxiv.org/abs/2208.13616v2)")
+                .as_deref(),
+            Some("2022-08-01")
         );
         assert_eq!(
-            find_year("[Journal 2026](https://example.com/2208.13616)"),
-            Some(2026)
+            find_publication_date("[arXiv:2605.26690](https://arxiv.org/abs/2605.26690)")
+                .as_deref(),
+            Some("2026-05-01")
+        );
+        assert_eq!(
+            find_publication_date("[Journal 2026](https://example.com/article)").as_deref(),
+            Some("2026-01-01")
         );
     }
 

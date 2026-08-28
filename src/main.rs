@@ -4,12 +4,14 @@ mod evaluation;
 mod google_scholar;
 mod openalex;
 mod reader;
+mod works;
 
 use crate::config::{Config, FeedConfig};
 use crate::openalex::{
     normalize_id, Author, AuthorsResponse, SourceRecord, SourcesResponse, Work, WorksResponse,
     API_BASE,
 };
+use crate::works::{mark_authors_by_name, merge_works, normalize_author_name};
 use chrono::{Duration, NaiveDate, NaiveTime, Utc};
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
@@ -121,6 +123,7 @@ type FeedCacheKey = (
     Vec<String>,
     Vec<String>,
     Vec<String>,
+    Vec<String>,
     String,
     Vec<String>,
 );
@@ -135,6 +138,8 @@ struct FeedRequest {
     author_ids: Vec<String>,
     /// Author names queried by the archived Google Scholar provider.
     google_scholar_authors: Vec<String>,
+    /// Canonical author names and explicit aliases used for provider-neutral highlighting.
+    tracked_author_names: Vec<String>,
     /// Curated paper collections included in the feed.
     curated_sources: Vec<String>,
     /// Normalized, deduped, sorted OpenAlex source (journal) ids.
@@ -153,6 +158,7 @@ impl FeedRequest {
             self.provider,
             self.author_ids.clone(),
             self.google_scholar_authors.clone(),
+            self.tracked_author_names.clone(),
             self.curated_sources.clone(),
             self.source_ids.clone(),
             self.from.clone(),
@@ -511,6 +517,25 @@ async fn resolve_feed_request(
     curated_sources.sort();
     curated_sources.dedup();
     curated::validate_sources(&curated_sources).map_err(ResolveFeedError::InvalidRequest)?;
+    let mut tracked_author_names = feed
+        .people
+        .iter()
+        .flat_map(|person| {
+            [
+                Some(person.name.as_str()),
+                person.google_scholar_name.as_deref(),
+            ]
+        })
+        .flatten()
+        .chain(feed.authors.iter().map(String::as_str))
+        .chain(feed.google_scholar_authors.iter().map(String::as_str))
+        .chain(adhoc_authors.iter().map(String::as_str))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    tracked_author_names.sort();
+    tracked_author_names.dedup();
 
     if provider == Provider::GoogleScholar {
         let mut google_scholar_authors = feed
@@ -544,6 +569,7 @@ async fn resolve_feed_request(
             provider,
             author_ids: Vec::new(),
             google_scholar_authors,
+            tracked_author_names,
             curated_sources,
             source_ids: Vec::new(),
             from,
@@ -643,6 +669,7 @@ async fn resolve_feed_request(
         provider,
         author_ids,
         google_scholar_authors: Vec::new(),
+        tracked_author_names,
         curated_sources,
         source_ids,
         from,
@@ -911,7 +938,9 @@ async fn fetch_works(request: &FeedRequest) -> Result<Vec<Work>, String> {
         fetch_provider_works(request),
         curated::fetch_sources(&CLIENT, &request.curated_sources, &request.from),
     );
-    Ok(merge_works(provider_works?, curated_works?))
+    let mut works = merge_works(provider_works?, curated_works?);
+    mark_authors_by_name(&mut works, &request.tracked_author_names);
+    Ok(works)
 }
 
 async fn fetch_provider_works(request: &FeedRequest) -> Result<Vec<Work>, String> {
@@ -990,259 +1019,6 @@ fn mark_feed_authors(works: &mut [Work], feed_author_ids: &[String]) {
         work.matched_author_names.sort();
         work.matched_author_names.dedup();
     }
-}
-
-/// A signature that identifies a work well enough to treat two records as versions of
-/// each other. Two works are grouped when *any* of their keys match.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub(crate) enum VersionKey {
-    /// Identical DOIs always denote the same work.
-    Doi(String),
-    /// Normalized title plus the complete set of OpenAlex author ids.
-    AuthorIds(String, Vec<String>),
-    /// Normalized title plus the complete set of normalized author names. Catches the
-    /// common case where OpenAlex minted two author entities for the same person.
-    AuthorNames(String, Vec<String>),
-}
-
-/// Merge two result sets, deduplicating exact OpenAlex records and grouping versions that
-/// share a DOI, or a normalized title together with the same author ids *or* author names.
-pub(crate) fn merge_works(primary: Vec<Work>, secondary: Vec<Work>) -> Vec<Work> {
-    let mut seen: HashMap<String, usize> = HashMap::new();
-    let mut version_groups: HashMap<VersionKey, usize> = HashMap::new();
-    let mut works: Vec<Work> = Vec::new();
-
-    for work in primary.into_iter().chain(secondary) {
-        if let Some(index) = work.id.as_ref().and_then(|id| seen.get(id)).copied() {
-            merge_work_version(&mut works[index], work);
-            continue;
-        }
-
-        let keys = version_keys(&work);
-        let group = keys.iter().find_map(|key| version_groups.get(key).copied());
-
-        match group {
-            Some(index) => {
-                if let Some(id) = &work.id {
-                    seen.insert(id.clone(), index);
-                }
-                merge_work_version(&mut works[index], work);
-                // Register the incoming record's keys too, so later records matching
-                // either variant land in the same group.
-                for key in keys {
-                    version_groups.entry(key).or_insert(index);
-                }
-            }
-            None => {
-                let index = works.len();
-                if let Some(id) = &work.id {
-                    seen.insert(id.clone(), index);
-                }
-                for key in keys {
-                    version_groups.insert(key, index);
-                }
-                works.push(work);
-            }
-        }
-    }
-
-    works.sort_by(|a, b| {
-        let da = a.publication_date.as_deref().unwrap_or("");
-        let db = b.publication_date.as_deref().unwrap_or("");
-        db.cmp(da)
-    });
-
-    works
-}
-
-pub(crate) fn version_keys(work: &Work) -> Vec<VersionKey> {
-    let mut keys = Vec::new();
-
-    if let Some(doi) = work.doi.as_deref().map(normalize_doi) {
-        if !doi.is_empty() {
-            keys.push(VersionKey::Doi(doi));
-        }
-    }
-
-    let title = work
-        .title
-        .as_ref()
-        .or(work.display_name.as_ref())
-        .map(|title| normalize_title(title))
-        .filter(|title| !title.is_empty());
-
-    let (Some(title), Some(authorships)) = (title, work.authorships.as_ref()) else {
-        return keys;
-    };
-    if authorships.is_empty() {
-        return keys;
-    }
-
-    // Only usable when *every* authorship carries an id: a partial set would let two
-    // genuinely different works collide.
-    let author_ids = authorships
-        .iter()
-        .map(|authorship| {
-            authorship
-                .author
-                .as_ref()?
-                .id
-                .as_ref()
-                .map(|id| normalize_id(id))
-        })
-        .collect::<Option<Vec<_>>>();
-    if let Some(mut author_ids) = author_ids {
-        author_ids.sort();
-        author_ids.dedup();
-        if !author_ids.is_empty() {
-            keys.push(VersionKey::AuthorIds(title.clone(), author_ids));
-        }
-    }
-
-    // Author names come in two flavours that disagree surprisingly often (`F Vermeire`
-    // vs the raw `Florence Vermeire`), so key on each variant independently.
-    let name_sources: [fn(&crate::openalex::Authorship) -> Option<&str>; 3] = [
-        |authorship| {
-            authorship
-                .author
-                .as_ref()
-                .and_then(|author| author.display_name.as_deref())
-                .or(authorship.raw_author_name.as_deref())
-        },
-        |authorship| {
-            authorship
-                .author
-                .as_ref()
-                .and_then(|author| author.display_name.as_deref())
-        },
-        |authorship| authorship.raw_author_name.as_deref(),
-    ];
-
-    for source in name_sources {
-        let author_names = authorships
-            .iter()
-            .map(|authorship| {
-                let name = normalize_author_name(source(authorship)?);
-                (!name.is_empty()).then_some(name)
-            })
-            .collect::<Option<Vec<_>>>();
-
-        if let Some(mut author_names) = author_names {
-            author_names.sort();
-            author_names.dedup();
-            if !author_names.is_empty() {
-                let key = VersionKey::AuthorNames(title.clone(), author_names);
-                if !keys.contains(&key) {
-                    keys.push(key);
-                }
-            }
-        }
-    }
-
-    keys
-}
-
-/// Reduce a DOI to a comparable form: bare lowercase `10.x/y` without the resolver prefix.
-fn normalize_doi(doi: &str) -> String {
-    let doi = doi.trim().to_lowercase();
-    let doi = doi
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .trim_start_matches("dx.")
-        .trim_start_matches("doi.org/")
-        .trim_start_matches("doi:");
-    doi.trim().trim_end_matches('/').to_string()
-}
-
-/// Normalize an author name into an order-independent set of name tokens, so that
-/// `Tang, Sophia`, `Sophia Tang` and `Sophia  TANG` all compare equal. Single-character
-/// initials are dropped so `S. Tang` also matches, unless that would leave nothing.
-fn normalize_author_name(name: &str) -> String {
-    let tokens = name
-        .split(|character: char| !character.is_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .map(str::to_lowercase)
-        .collect::<Vec<_>>();
-
-    let mut significant = tokens
-        .iter()
-        .filter(|token| token.chars().count() > 1)
-        .cloned()
-        .collect::<Vec<_>>();
-    if significant.is_empty() {
-        significant = tokens;
-    }
-
-    significant.sort();
-    significant.dedup();
-    significant.join(" ")
-}
-
-fn normalize_title(title: &str) -> String {
-    let mut normalized = String::new();
-    let mut separated = false;
-
-    for character in title.chars().flat_map(char::to_lowercase) {
-        if character.is_alphanumeric() {
-            if separated && !normalized.is_empty() {
-                normalized.push(' ');
-            }
-            normalized.push(character);
-            separated = false;
-        } else if !normalized.is_empty() {
-            separated = true;
-        }
-    }
-
-    normalized
-}
-
-fn merge_work_version(existing: &mut Work, mut candidate: Work) {
-    let mut matched_author_names = std::mem::take(&mut existing.matched_author_names);
-    matched_author_names.append(&mut candidate.matched_author_names);
-    matched_author_names.sort();
-    matched_author_names.dedup();
-    let mut curated_sources = std::mem::take(&mut existing.curated_sources);
-    curated_sources.append(&mut candidate.curated_sources);
-    curated_sources.sort_by(|left, right| (&left.name, &left.url).cmp(&(&right.name, &right.url)));
-    curated_sources.dedup();
-    let mut curated_categories = std::mem::take(&mut existing.curated_categories);
-    curated_categories.append(&mut candidate.curated_categories);
-    curated_categories.sort();
-    curated_categories.dedup();
-
-    if version_quality(&candidate) > version_quality(existing) {
-        std::mem::swap(existing, &mut candidate);
-    }
-
-    let selected_link = existing.best_link();
-    let mut alternate_links = std::mem::take(&mut existing.alternate_links);
-    alternate_links.append(&mut candidate.alternate_links);
-    if let Some(link) = candidate.best_link() {
-        alternate_links.push(link);
-    }
-    alternate_links.retain(|link| Some(link) != selected_link.as_ref());
-    alternate_links.sort();
-    alternate_links.dedup();
-    existing.alternate_links = alternate_links;
-    existing.matched_author_names = matched_author_names;
-    existing.curated_sources = curated_sources;
-    existing.curated_categories = curated_categories;
-}
-
-fn version_quality(work: &Work) -> (bool, bool, bool, &str) {
-    let has_pdf = work.oa_pdf_url().is_some();
-    let has_abstract = work
-        .abstract_inverted_index
-        .as_ref()
-        .is_some_and(|index| !index.is_empty());
-    let is_published = [&work.primary_location, &work.best_oa_location]
-        .into_iter()
-        .flatten()
-        .any(|location| location.version.as_deref() == Some("publishedVersion"));
-    let publication_date = work.publication_date.as_deref().unwrap_or("");
-
-    (has_pdf, has_abstract, is_published, publication_date)
 }
 
 /// Run a single `/works` query for the given filter (or return empty if `None`).
@@ -1883,6 +1659,15 @@ google_scholar_name = "David W Baker"
             request.google_scholar_authors,
             vec!["David W Baker", "Legacy Author", "Pranam Chatterjee"]
         );
+        assert_eq!(
+            request.tracked_author_names,
+            vec![
+                "David Baker",
+                "David W Baker",
+                "Legacy Author",
+                "Pranam Chatterjee"
+            ]
+        );
         assert!(request.source_ids.is_empty());
     }
 
@@ -1913,6 +1698,10 @@ name = "Scholar only"
         assert_eq!(request.provider, Provider::OpenAlex);
         assert_eq!(request.author_ids, vec!["A5016342562"]);
         assert!(request.google_scholar_authors.is_empty());
+        assert_eq!(
+            request.tracked_author_names,
+            vec!["Pranam Chatterjee", "Scholar only"]
+        );
     }
 
     #[tokio::test]
@@ -1935,7 +1724,20 @@ curated_sources = ["peldom-protein-design"]
 
         assert!(request.author_ids.is_empty());
         assert!(request.source_ids.is_empty());
+        assert!(request.tracked_author_names.is_empty());
         assert_eq!(request.curated_sources, vec!["peldom-protein-design"]);
         assert_eq!(request.from, "1900-01-01");
+    }
+
+    #[test]
+    fn production_bioml_feed_enables_recent_curated_discovery() {
+        let config: Config = toml::from_str(include_str!("../feeds.toml")).unwrap();
+        let bioml = config.feeds.get("bioml").unwrap();
+        let archive = config.feeds.get("protein-design-archive").unwrap();
+
+        assert_eq!(bioml.curated_sources, vec!["peldom-protein-design"]);
+        assert!(bioml.from.is_none());
+        assert_eq!(archive.curated_sources, vec!["peldom-protein-design"]);
+        assert_eq!(archive.from.as_deref(), Some("1900-01-01"));
     }
 }

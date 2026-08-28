@@ -8,6 +8,7 @@ from_days = 365
 # `default_feed` above is the one served at the bare "/" URL.
 [feeds.bioml]
 title = "Machine Learning & Synthetic Biology"
+curated_sources = ["peldom-protein-design"]
 # You can also list ORCIDs and names (names are imprecise for common authors):
 # orcids  = ["0000-0002-1825-0097"]
 # authors = ["Regina Barzilay"]

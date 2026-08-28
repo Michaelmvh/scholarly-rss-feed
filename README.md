@@ -155,18 +155,30 @@ is intentionally explicit instead of automatic so an OpenAlex outage cannot unex
 trigger many Google Scholar requests. Google Scholar exposes only a publication year in these
 results, so the `from` cutoff is truncated to that year when this provider is active.
 
-### Curated protein-design archive
+### Curated protein-design papers
 
-The named `protein-design-archive` feed ingests stable-ID papers from
+The default `bioml` feed includes recent stable-ID papers from
 [Peldom/papers_for_protein_design_using_DL](https://github.com/Peldom/papers_for_protein_design_using_DL):
+
+```text
+http://localhost:3005/
+http://localhost:3005/?rss
+```
+
+The named `protein-design-archive` feed retains the complete accepted history:
 
 ```text
 http://localhost:3005/?feed=protein-design-archive
 http://localhost:3005/?feed=protein-design-archive&rss
 ```
 
-This source is independent of the selected OpenAlex or Google Scholar provider. Phase 1
-includes entries with an explicit DOI, bioRxiv DOI (`10.1101` or `10.64898`), or arXiv ID.
+This source is independent of the selected OpenAlex or Google Scholar provider. The default
+feed applies its normal one-year cutoff before merging and deduplicating curated and provider
+records. Tracked authors are highlighted on curated-only records using normalized exact-name
+matching against canonical names and configured aliases.
+
+Curated ingestion includes entries with an explicit DOI, bioRxiv DOI (`10.1101` or
+`10.64898`), or arXiv ID.
 Entries without a stable identifier and entries marked unavailable are skipped. Benchmarks and
 datasets (section 0), small-molecule models (section 7.3), and unclassified commercial reports
 (section 7.5) are intentionally excluded.
@@ -175,21 +187,23 @@ The upstream Markdown is fetched at most once every 24 hours with conditional ET
 a 2 MiB response limit, and the shared provider timeouts. Invalid updates do not replace a
 successfully parsed snapshot. The archive displays upstream section provenance and links back
 to the curated source; the GPL-licensed README itself is not copied into this repository.
-Publication dates are year-granular because that is the precision consistently available in
-the source list.
+Publication dates preserve the precision available in the source list: bioRxiv identifiers
+provide an exact day, modern arXiv identifiers provide a year and month, and citations that
+only state a year use January 1 as an explicit year-only placeholder.
 
-Phase 2 can be evaluated without adding curated papers to the default feed:
+Curated coverage can be evaluated independently of generated feed output:
 
 ```sh
 cargo run -- --compare-curated bioml peldom-protein-design --config feeds.toml
 ```
 
-The command fetches the configured feed from the selected provider and compares it with recent
+The command fetches the configured provider records and compares them with recent
 curated papers using the feed's normal cutoff. Its Markdown report includes DOI and
 title/author overlap, unique curated discoveries, version-merged volume, metadata gaps,
 provider enrichment opportunities, section distribution, and all-time parser exclusions. It
-does not modify configuration or feed output. Set `GSRF_PROVIDER` to compare against the
-explicit Google Scholar fallback instead of OpenAlex.
+does not modify configuration or feed output. Known false positives found during manual review
+are excluded by stable identifier and reported separately from structural parser exclusions.
+Set `GSRF_PROVIDER` to compare against the explicit Google Scholar fallback instead of OpenAlex.
 
 ### Finding reliable OpenAlex IDs
 
@@ -234,8 +248,9 @@ All identifier parameters are repeatable and are merged with a selected named fe
 
 The browser reader is server-rendered HTML with no JavaScript or external assets. Selecting a
 publication opens an internal preview page with its abstract and a link to the original
-article. Authors whose configured OpenAlex IDs caused a publication to match the feed are
-highlighted in both views; if several configured authors contributed, each is highlighted.
+article. Tracked authors are highlighted in both views using provider IDs when available and
+canonical names or configured aliases for curated records; if several tracked authors
+contributed, each is highlighted.
 Raw RSS has CORS enabled. The generated channel has a 60-minute TTL, and the in-memory cache is
 cleared hourly.
 
@@ -267,8 +282,8 @@ cargo clippy --all-targets --all-features
 
 The test suite uses local fixtures and constructed provider records; it does not contact
 OpenAlex or Google Scholar. It covers provider selection, Google Scholar result conversion,
-feed configuration, version deduplication, author highlighting, RSS conversion, HTML escaping,
-and article previews.
+feed configuration, curated-source parsing and evaluation, version deduplication,
+provider-neutral author highlighting, RSS conversion, HTML escaping, and article previews.
 
 ### Local Docker Compose
 
