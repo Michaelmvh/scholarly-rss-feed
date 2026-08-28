@@ -89,6 +89,10 @@ openalex_id = "A5059179935"
 name = "Ava P. Amini"
 openalex_id = "A5071306257"
 
+[[feeds.bioml.people]]
+name = "Nicholas F. Polizzi"
+openalex_id = "A5058410619"
+
 # A journal-only feed: recent papers from specific journals, no authors required.
 [feeds.top-journals]
 title = "Top Journals"
