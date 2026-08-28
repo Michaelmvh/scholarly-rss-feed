@@ -373,11 +373,12 @@ The existing GitHub Pages site can coexist with the tunnel:
 
 ### Automatic image updates
 
-Container Manager does not automatically redeploy a changed `latest` image. To automate it,
-open **DSM Control Panel → Task Scheduler → Create → Scheduled Task → User-defined script**:
+Container Manager does not automatically pull or redeploy a changed `latest` image when a
+container is stopped and started. The NAS uses a scheduled user-defined script named
+**Update Scholar RSS**:
 
 - Run as: `root`
-- Schedule: daily at a convenient time
+- Schedule: weekly
 - Script:
 
 ```sh
@@ -389,8 +390,16 @@ cd /volume1/docker/scholar-rss &&
 This updates both the application and `cloudflared`. It leaves the existing containers running
 if pulling an image fails because the commands are chained with `&&`.
 
-For a manual update, run the same command over SSH or use **Pull** and rebuild the project in
-Container Manager.
+For an immediate application update, explicitly pull the image and force recreation; merely
+uploading Compose or restarting the existing container can reuse the old local image:
+
+```sh
+cd /volume1/docker/scholar-rss &&
+/usr/local/bin/docker compose pull scholar-rss &&
+/usr/local/bin/docker compose up -d --force-recreate scholar-rss
+```
+
+Alternatively, use **Pull** and rebuild the project in Container Manager.
 
 ### Updating the Compose configuration
 
@@ -399,7 +408,14 @@ The scheduled task updates images, not `docker-compose.yml`. If
 
 1. Download or upload the new file from GitHub over the existing NAS copy.
 2. Keep the existing `.env`; it contains the tunnel secret.
-3. Rebuild/recreate the Container Manager project.
+3. Pull and recreate the project so both the new Compose settings and latest images take
+   effect:
+
+   ```sh
+   cd /volume1/docker/scholar-rss &&
+   /usr/local/bin/docker compose pull &&
+   /usr/local/bin/docker compose up -d --force-recreate --remove-orphans
+   ```
 
 ### Rollback
 
