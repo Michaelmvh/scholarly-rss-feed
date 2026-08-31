@@ -328,6 +328,17 @@ async fn run_curated_comparison(
 }
 
 async fn serve_feed(request: Request<Incoming>) -> Result<Response<Full<Bytes>>, Error> {
+    if request.uri().path() == "/favicon.svg" {
+        return Response::builder()
+            .header("Content-Type", "image/svg+xml")
+            .header(
+                "Cache-Control",
+                "public, max-age=300, s-maxage=7200, stale-while-revalidate=86400",
+            )
+            .status(StatusCode::OK)
+            .body(Full::new(Bytes::from_static(reader::FAVICON.as_bytes())));
+    }
+
     // Preserve repeated query params (e.g. multiple ?author_id=).
     let params: Vec<(String, String)> = request
         .uri()

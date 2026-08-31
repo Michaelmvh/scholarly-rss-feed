@@ -69,6 +69,11 @@ h2 a { color: inherit; text-decoration-color: #9db8b3; }
 @media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
 "#;
 
+pub const FAVICON: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <text x="32" y="52" font-size="56" text-anchor="middle">📖</text>
+</svg>
+"#;
+
 pub fn render_feed(feed: &Feed, params: &[(String, String)]) -> String {
     let title = escape_html(&feed.title);
     let description = escape_html(&feed.description);
@@ -124,6 +129,7 @@ pub fn render_feed(feed: &Feed, params: &[(String, String)]) -> String {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="{description}">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="alternate" type="application/rss+xml" title="{title}" href="{rss_url}">
   <title>{title}</title>
   <style>{STYLES}</style>
@@ -189,6 +195,7 @@ pub fn render_article(
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Abstract for {item_title}">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="alternate" type="application/rss+xml" title="{feed_title}" href="{rss_url}">
   <title>{item_title} · {feed_title}</title>
   <style>{STYLES}</style>
@@ -416,6 +423,7 @@ mod tests {
         assert!(!html.contains("<script>alert"));
         assert!(html.contains("article=https%3A%2F%2Fopenalex.org%2FW1"));
         assert!(html.contains("href=\"?feed=myfield&amp;rss\""));
+        assert!(html.contains(r#"<link rel="icon" href="/favicon.svg" type="image/svg+xml">"#));
         assert!(html.contains("Curated by"));
         assert!(html.contains("https://example.com/source?a=1&amp;b=2"));
     }
@@ -427,6 +435,7 @@ mod tests {
 
         assert!(html.contains("https://example.com/?a=1&amp;b=2"));
         assert!(html.contains("&lt;strong&gt;abstract&lt;/strong&gt;"));
+        assert!(html.contains(r#"<link rel="icon" href="/favicon.svg" type="image/svg+xml">"#));
         assert!(html.contains(
             r#"<strong class="notable-author">Ada Lovelace</strong>, <strong class="notable-author">Grace Hopper</strong>, Alan Turing"#
         ));
