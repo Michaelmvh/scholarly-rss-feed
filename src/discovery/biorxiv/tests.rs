@@ -89,3 +89,27 @@ fn parses_semicolon_delimited_authors() {
         vec!["Doe, J", "Smith, A"]
     );
 }
+
+#[test]
+fn deserializes_official_response_field_names() {
+    let response: ApiResponse = serde_json::from_str(
+        r#"{
+            "messages": [{"total": "1"}],
+            "collection": [{
+                "doi": "10.1101/2026.01.02.123456",
+                "title": "A useful preprint",
+                "authors": "Doe, J.; Smith, A.",
+                "date": "2026-01-02",
+                "version": "1",
+                "license": "cc_by",
+                "category": "bioinformatics",
+                "jatsxml": "https://www.biorxiv.org/source.xml",
+                "abstract": "An abstract.",
+                "published": "NA"
+            }]
+        }"#,
+    )
+    .unwrap();
+
+    assert_eq!(response.collection[0].abstract_text, "An abstract.");
+}

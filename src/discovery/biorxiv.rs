@@ -50,6 +50,7 @@ struct ApiWork {
     license: String,
     category: String,
     jatsxml: String,
+    #[serde(rename = "abstract")]
     abstract_text: String,
     published: String,
 }
