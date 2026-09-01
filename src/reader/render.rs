@@ -1,79 +1,7 @@
-#[derive(Clone, Debug)]
-pub struct Feed {
-    pub title: String,
-    pub description: String,
-    pub publications: Vec<Publication>,
-}
+use super::{Author, Feed, Publication};
 
-#[derive(Clone, Debug)]
-pub struct Publication {
-    pub id: Option<String>,
-    pub title: String,
-    pub link: Option<String>,
-    pub pdf_url: Option<String>,
-    pub publication_date: Option<String>,
-    pub collection_date: Option<CollectionDate>,
-    pub venue: Option<String>,
-    pub authors: Vec<Author>,
-    pub abstract_text: Option<String>,
-    pub curated_sources: Vec<Attribution>,
-    pub curated_categories: Vec<String>,
-}
-
-#[derive(Clone, Debug)]
-pub struct Author {
-    pub name: String,
-    pub matched_feed: bool,
-}
-
-#[derive(Clone, Debug)]
-pub struct Attribution {
-    pub name: String,
-    pub url: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct CollectionDate {
-    pub date: String,
-    pub commit_url: String,
-}
-
-const STYLES: &str = r#"
-:root { color-scheme: light; font-family: ui-serif, Georgia, Cambria, "Times New Roman", serif; background: #f7f5f0; color: #272522; }
-* { box-sizing: border-box; }
-body { margin: 0; }
-main { width: min(48rem, calc(100% - 2rem)); margin: 0 auto; padding: clamp(2rem, 7vw, 5rem) 0; }
-header { border-bottom: 1px solid #d8d2c7; padding-bottom: 2rem; }
-h1 { max-width: 18ch; margin: 0 0 .75rem; font-size: clamp(2.25rem, 8vw, 4.5rem); font-weight: 500; line-height: .98; letter-spacing: -.035em; }
-.intro { max-width: 42rem; margin: 0; color: #625e57; font-size: 1.05rem; line-height: 1.6; }
-.feed-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .75rem; margin: 1.25rem 0 0; font: .85rem/1.4 ui-sans-serif, system-ui, sans-serif; color: #625e57; }
-a { color: #175e54; text-decoration-thickness: .08em; text-underline-offset: .16em; }
-a:hover { color: #0d3d36; }
-.publication-list { margin: 0; padding: 0; list-style: none; }
-.publication { padding: 2rem 0; border-bottom: 1px solid #d8d2c7; }
-h2 { margin: .35rem 0 .75rem; font-size: clamp(1.35rem, 4vw, 1.8rem); font-weight: 500; line-height: 1.2; letter-spacing: -.015em; }
-h2 a { color: inherit; text-decoration-color: #9db8b3; }
-.metadata, .authors, .back { font-family: ui-sans-serif, system-ui, sans-serif; color: #625e57; }
-.metadata { margin: 0; font-size: .78rem; font-weight: 650; letter-spacing: .045em; text-transform: uppercase; }
-.authors { margin: 0; font-size: .9rem; line-height: 1.55; }
-.notable-author { color: #175e54; font-weight: 750; }
-.author-key, .author-note { margin: .75rem 0 0; font: .8rem/1.45 ui-sans-serif, system-ui, sans-serif; color: #625e57; }
-.provenance { margin: .75rem 0 0; font: .78rem/1.5 ui-sans-serif, system-ui, sans-serif; color: #625e57; }
-.empty { padding: 3rem 0; color: #625e57; }
-.back { display: inline-block; margin-bottom: 2.5rem; font-size: .9rem; }
-.article-detail { padding-top: 0; border: 0; }
-.article-detail h1 { max-width: 22ch; font-size: clamp(2rem, 7vw, 3.75rem); line-height: 1.06; }
-.abstract { margin-top: 2.25rem; color: #48453f; font-size: 1.08rem; line-height: 1.75; }
-.abstract h2 { font: 650 .82rem/1.4 ui-sans-serif, system-ui, sans-serif; letter-spacing: .06em; text-transform: uppercase; }
-.actions { display: flex; flex-wrap: wrap; gap: .75rem 1.25rem; align-items: center; margin-top: 2rem; font: 600 .9rem/1.4 ui-sans-serif, system-ui, sans-serif; }
-.primary-action { display: inline-block; padding: .7rem 1rem; border-radius: .25rem; background: #175e54; color: #fff; text-decoration: none; }
-.primary-action:hover { background: #0d3d36; color: #fff; }
-.secondary-action { display: inline-block; padding: .65rem .95rem; border: 1px solid #175e54; border-radius: .25rem; text-decoration: none; }
-.secondary-action:hover { border-color: #0d3d36; }
-@media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
-"#;
-
-pub const FAVICON: &str = include_str!("assets/apple-touch-icon.svg");
+pub const FAVICON: &str = include_str!("../assets/apple-touch-icon.svg");
+pub const READER_CSS: &str = include_str!("../assets/reader.css");
 
 pub fn render_feed(feed: &Feed, params: &[(String, String)]) -> String {
     let title = escape_html(&feed.title);
@@ -134,7 +62,7 @@ pub fn render_feed(feed: &Feed, params: &[(String, String)]) -> String {
   <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
   <link rel="alternate" type="application/rss+xml" title="{title}" href="{rss_url}">
   <title>{title}</title>
-  <style>{STYLES}</style>
+  <link rel="stylesheet" href="/reader.css">
 </head>
 <body>
   <main>
@@ -213,7 +141,7 @@ pub fn render_article(
   <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
   <link rel="alternate" type="application/rss+xml" title="{feed_title}" href="{rss_url}">
   <title>{item_title} · {feed_title}</title>
-  <style>{STYLES}</style>
+  <link rel="stylesheet" href="/reader.css">
 </head>
 <body>
   <main>
@@ -416,6 +344,7 @@ fn escape_html(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{Attribution, CollectionDate};
     use super::*;
     use scraper::{Html, Selector};
 

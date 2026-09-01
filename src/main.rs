@@ -339,6 +339,16 @@ async fn serve_feed(request: Request<Incoming>) -> Result<Response<Full<Bytes>>,
             .status(StatusCode::OK)
             .body(Full::new(Bytes::from_static(reader::FAVICON.as_bytes())));
     }
+    if request.uri().path() == "/reader.css" {
+        return Response::builder()
+            .header("Content-Type", "text/css; charset=utf-8")
+            .header(
+                "Cache-Control",
+                "public, max-age=300, s-maxage=7200, stale-while-revalidate=86400",
+            )
+            .status(StatusCode::OK)
+            .body(Full::new(Bytes::from_static(reader::READER_CSS.as_bytes())));
+    }
     if request.uri().path() == "/apple-touch-icon.png" {
         return Response::builder()
             .header("Content-Type", "image/png")
