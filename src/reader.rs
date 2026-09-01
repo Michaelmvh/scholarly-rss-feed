@@ -10,6 +10,7 @@ pub struct Publication {
     pub id: Option<String>,
     pub title: String,
     pub link: Option<String>,
+    pub pdf_url: Option<String>,
     pub publication_date: Option<String>,
     pub collection_date: Option<CollectionDate>,
     pub venue: Option<String>,
@@ -67,6 +68,8 @@ h2 a { color: inherit; text-decoration-color: #9db8b3; }
 .actions { display: flex; flex-wrap: wrap; gap: .75rem 1.25rem; align-items: center; margin-top: 2rem; font: 600 .9rem/1.4 ui-sans-serif, system-ui, sans-serif; }
 .primary-action { display: inline-block; padding: .7rem 1rem; border-radius: .25rem; background: #175e54; color: #fff; text-decoration: none; }
 .primary-action:hover { background: #0d3d36; color: #fff; }
+.secondary-action { display: inline-block; padding: .65rem .95rem; border: 1px solid #175e54; border-radius: .25rem; text-decoration: none; }
+.secondary-action:hover { border-color: #0d3d36; }
 @media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
 "#;
 
@@ -188,6 +191,16 @@ pub fn render_article(
             )
         })
         .unwrap_or_default();
+    let pdf_link = publication
+        .pdf_url
+        .as_deref()
+        .map(|link| {
+            format!(
+                r#"<a class="secondary-action" href="{}" rel="external">Open PDF <span aria-hidden="true">↗</span></a>"#,
+                escape_html(link)
+            )
+        })
+        .unwrap_or_default();
 
     Some(format!(
         r#"<!doctype html>
@@ -215,7 +228,7 @@ pub fn render_article(
         <h2 id="abstract-heading">Abstract</h2>
         <p>{abstract_text}</p>
       </section>
-      <p class="actions">{article_link}<a href="{rss_url}">View raw RSS</a></p>
+      <p class="actions">{article_link}{pdf_link}<a href="{rss_url}">View raw RSS</a></p>
     </article>
   </main>
 </body>
@@ -414,6 +427,7 @@ mod tests {
                 id: Some("https://openalex.org/W1".to_string()),
                 title: "<script>alert('title')</script>".to_string(),
                 link: Some("https://example.com/?a=1&b=2".to_string()),
+                pdf_url: Some("https://example.com/article.pdf?a=1&b=2".to_string()),
                 publication_date: Some("2026-08-27".to_string()),
                 collection_date: None,
                 venue: Some("Example & Journal".to_string()),
@@ -514,6 +528,9 @@ mod tests {
         let publication_list = Selector::parse("ol.publication-list").unwrap();
 
         assert!(html.contains("https://example.com/?a=1&amp;b=2"));
+        assert!(html.contains(
+            r#"<a class="secondary-action" href="https://example.com/article.pdf?a=1&amp;b=2" rel="external">Open PDF"#
+        ));
         assert!(html.contains("&lt;strong&gt;abstract&lt;/strong&gt;"));
         assert!(html.contains(r#"<link rel="icon" href="/favicon.svg" type="image/svg+xml">"#));
         assert!(html.contains(

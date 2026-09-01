@@ -1231,6 +1231,7 @@ fn work_to_publication(work: &Work) -> reader::Publication {
         id: work.id.clone().or_else(|| work.best_link()),
         title: work.best_title(),
         link: work.best_link(),
+        pdf_url: work.oa_pdf_url(),
         publication_date: work.publication_date.clone(),
         collection_date: work.collection_date.as_ref().map(|collection_date| {
             reader::CollectionDate {
