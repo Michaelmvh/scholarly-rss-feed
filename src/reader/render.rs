@@ -1,10 +1,12 @@
 use super::filters::{
-    is_view_param, FilterOptions, Period, ViewFilters, AUTHOR_PARAM, PERIOD_PARAM, SOURCE_PARAM,
+    is_view_param, FilterOptions, Period, ViewFilters, AUTHOR_PARAM, EXCLUDE_CURATED_ONLY,
+    PERIOD_PARAM, SOURCE_PARAM,
 };
 use super::{Author, Feed, Publication};
 
 pub const FAVICON: &str = include_str!("../assets/apple-touch-icon.svg");
 pub const READER_CSS: &str = include_str!("../assets/reader.css");
+pub const READER_JS: &str = include_str!("../assets/reader.js");
 
 pub fn render_feed(feed: &Feed, params: &[(String, String)]) -> String {
     let title = escape_html(&feed.title);
@@ -76,7 +78,8 @@ pub fn render_feed(feed: &Feed, params: &[(String, String)]) -> String {
   <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
   <link rel="alternate" type="application/rss+xml" title="{title}" href="{rss_url}">
   <title>{title}</title>
-  <link rel="stylesheet" href="/reader.css?v=2">
+  <link rel="stylesheet" href="/reader.css?v=4">
+  <script src="/reader.js?v=3" defer></script>
 </head>
 <body>
   <main>
@@ -156,7 +159,7 @@ pub fn render_article(
   <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
   <link rel="alternate" type="application/rss+xml" title="{feed_title}" href="{rss_url}">
   <title>{item_title} · {feed_title}</title>
-  <link rel="stylesheet" href="/reader.css?v=2">
+  <link rel="stylesheet" href="/reader.css?v=4">
 </head>
 <body>
   <main>
@@ -291,26 +294,17 @@ fn render_filter_form(
         )
     })
     .collect::<String>();
-    let author_filter = render_filter_select(
-        "Tracked author",
-        AUTHOR_PARAM,
-        "Any tracked author",
-        filters.author.as_deref(),
-        &options.authors,
-    );
-    let source_filter = render_filter_select(
-        "Curated collection",
-        SOURCE_PARAM,
-        "Any curated collection",
-        filters.source.as_deref(),
-        &options.sources,
-    );
-    let clear_link = if filters == &ViewFilters::default() {
-        String::new()
+    let author_filter = render_author_filter(&filters.authors, &options.authors);
+    let source_filter = render_source_filter(filters.source.as_deref(), options);
+    let (filter_action_class, clear_link) = if filters == &ViewFilters::default() {
+        ("filter-actions no-clear", String::new())
     } else {
-        format!(
-            r#"<a class="clear-filters" href="{}">Clear filters</a>"#,
-            escape_html(&unfiltered_reader_url(params))
+        (
+            "filter-actions",
+            format!(
+                r#"<a class="clear-filters" href="{}">Clear filters</a>"#,
+                escape_html(&unfiltered_reader_url(params))
+            ),
         )
     };
 
@@ -318,20 +312,17 @@ fn render_filter_form(
         r#"<form class="filters" method="get" action="/">
         {hidden_params}
         <div class="filter-fields">
-          <label>Publication date<select name="{PERIOD_PARAM}">{periods}</select></label>
+          <label class="filter-select">Publication date<select name="{PERIOD_PARAM}" data-auto-submit>{periods}</select></label>
           {author_filter}
           {source_filter}
         </div>
-        <div class="filter-actions"><button type="submit">Apply filters</button>{clear_link}</div>
+        <div class="{filter_action_class}"><button class="apply-filters" type="submit">Apply filters</button>{clear_link}</div>
       </form>"#
     )
 }
 
-fn render_filter_select(
-    label: &str,
-    name: &str,
-    empty_label: &str,
-    selected: Option<&str>,
+fn render_author_filter(
+    selected: &[String],
     options: &std::collections::BTreeMap<String, String>,
 ) -> String {
     if options.is_empty() {
@@ -340,17 +331,74 @@ fn render_filter_select(
 
     let mut options = options.iter().collect::<Vec<_>>();
     options.sort_by(|left, right| left.1.cmp(right.1));
-    let options =
-        std::iter::once(render_option("", empty_label, selected.is_none()))
-            .chain(options.into_iter().map(|(value, label)| {
-                render_option(value, label, selected == Some(value.as_str()))
-            }))
-            .collect::<String>();
+    let selection_summary = match selected {
+        [] => "Any tracked author".to_string(),
+        [value] => options
+            .iter()
+            .find(|(option, _)| option.as_str() == value)
+            .map(|(_, label)| (*label).clone())
+            .unwrap_or_else(|| "1 selected".to_string()),
+        values => format!("{} selected", values.len()),
+    };
+    let checkboxes = options
+        .into_iter()
+        .map(|(value, label)| {
+            let checked = if selected.contains(value) {
+                " checked"
+            } else {
+                ""
+            };
+            format!(
+                r#"<label class="filter-checkbox"><input type="checkbox" name="{AUTHOR_PARAM}" value="{}" data-label="{}"{checked}><span>{}</span></label>"#,
+                escape_html(value),
+                escape_html(label),
+                escape_html(label)
+            )
+        })
+        .collect::<String>();
+    let all_checked = if selected.is_empty() { " checked" } else { "" };
 
     format!(
-        r#"<label>{}<select name="{}">{options}</select></label>"#,
-        escape_html(label),
-        escape_html(name)
+        r#"<details class="filter-multiselect" data-author-picker>
+            <summary><span class="filter-label">Tracked authors</span><span class="filter-value" data-selection-summary>{}</span></summary>
+            <div class="filter-options">
+              <label class="filter-checkbox filter-select-all" hidden><input type="checkbox" data-select-all{all_checked}><span>All tracked authors</span></label>
+              <div class="filter-option-list">{checkboxes}</div>
+            </div>
+          </details>"#,
+        escape_html(&selection_summary)
+    )
+}
+
+fn render_source_filter(selected: Option<&str>, filter_options: &FilterOptions) -> String {
+    if filter_options.sources.is_empty() && !filter_options.can_exclude_collection_only {
+        return String::new();
+    }
+
+    let mut collection_options = filter_options.sources.iter().collect::<Vec<_>>();
+    collection_options.sort_by(|left, right| left.1.cmp(right.1));
+    let collection_options = collection_options
+        .into_iter()
+        .map(|(value, label)| render_option(value, label, selected == Some(value.as_str())))
+        .collect::<String>();
+    let provenance_option = if filter_options.can_exclude_collection_only {
+        render_option(
+            EXCLUDE_CURATED_ONLY,
+            "Exclude collection-only papers",
+            selected == Some(EXCLUDE_CURATED_ONLY),
+        )
+    } else {
+        String::new()
+    };
+    let collection_group = if collection_options.is_empty() {
+        String::new()
+    } else {
+        format!(r#"<optgroup label="Curated collections">{collection_options}</optgroup>"#)
+    };
+
+    format!(
+        r#"<label class="filter-select">Collection source<select name="{SOURCE_PARAM}" data-auto-submit>{}{provenance_option}{collection_group}</select></label>"#,
+        render_option("", "Any collection status", selected.is_none())
     )
 }
 
@@ -504,6 +552,7 @@ mod tests {
                     },
                 ],
                 abstract_text: Some("<strong>abstract</strong>".to_string()),
+                provider_match: true,
                 curated_sources: vec![Attribution {
                     key: Some("curated-source".to_string()),
                     name: "Curated Source".to_string(),
@@ -545,9 +594,15 @@ mod tests {
         assert!(html.contains("1 of 2 publications"));
         assert!(html.contains("&lt;script&gt;alert(&#39;title&#39;)&lt;/script&gt;"));
         assert!(!html.contains("Second publication"));
-        assert!(html.contains(r#"<option value="ada lovelace" selected>Ada Lovelace</option>"#));
+        assert!(html.contains(
+            r#"<input type="checkbox" name="view_author" value="ada lovelace" data-label="Ada Lovelace" checked>"#
+        ));
         assert!(html.contains(r#"<option value="curated-source" selected>Curated Source</option>"#));
         assert!(html.contains("?view_author=ada+lovelace&amp;view_source=curated-source"));
+        assert!(html.contains(r#"<script src="/reader.js?v=3" defer></script>"#));
+        assert!(html.contains(
+            r#"<label class="filter-checkbox filter-select-all" hidden><input type="checkbox" data-select-all><span>All tracked authors</span>"#
+        ));
     }
 
     #[test]
@@ -604,6 +659,13 @@ mod tests {
         ));
         assert!(html.contains("Curated by"));
         assert!(html.contains("https://example.com/source?a=1&amp;b=2"));
+        assert!(html.contains(
+            r#"<option value="exclude-curated-only">Exclude collection-only papers</option>"#
+        ));
+        assert!(html.contains(r#"<optgroup label="Curated collections">"#));
+        assert!(html.contains(
+            r#"<label class="filter-checkbox filter-select-all" hidden><input type="checkbox" data-select-all checked><span>All tracked authors</span>"#
+        ));
     }
 
     #[test]

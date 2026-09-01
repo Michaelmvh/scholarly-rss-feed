@@ -49,6 +49,8 @@ pub struct Work {
     #[serde(default)]
     pub matched_author_names: Vec<String>,
     #[serde(default)]
+    pub provider_match: bool,
+    #[serde(default)]
     pub curated_sources: Vec<CuratedSource>,
     #[serde(default)]
     pub curated_categories: Vec<String>,

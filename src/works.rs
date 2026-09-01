@@ -243,6 +243,7 @@ fn normalize_title(title: &str) -> String {
 }
 
 fn merge_work_version(existing: &mut Work, mut candidate: Work) {
+    let provider_match = existing.provider_match || candidate.provider_match;
     let collection_date = existing
         .collection_date
         .take()
@@ -276,6 +277,7 @@ fn merge_work_version(existing: &mut Work, mut candidate: Work) {
     existing.alternate_links = alternate_links;
     existing.collection_date = collection_date;
     existing.matched_author_names = matched_author_names;
+    existing.provider_match = provider_match;
     existing.curated_sources = curated_sources;
     existing.curated_categories = curated_categories;
 }
@@ -327,6 +329,7 @@ mod tests {
             abstract_text_override: None,
             alternate_links: Vec::new(),
             matched_author_names: Vec::new(),
+            provider_match: false,
             curated_sources: Vec::new(),
             curated_categories: Vec::new(),
         }
@@ -419,5 +422,31 @@ mod tests {
                 .map(|date| date.date.as_str()),
             Some("2025-05-03")
         );
+    }
+
+    #[test]
+    fn merged_work_retains_provider_provenance() {
+        let provider: Work = serde_json::from_value(serde_json::json!({
+            "id": "https://openalex.org/W1",
+            "doi": "https://doi.org/10.1000/example",
+            "provider_match": true
+        }))
+        .unwrap();
+        let curated: Work = serde_json::from_value(serde_json::json!({
+            "id": "curated:1",
+            "doi": "https://doi.org/10.1000/example",
+            "curated_sources": [{
+                "key": "collection",
+                "name": "Collection",
+                "url": "https://example.com/collection"
+            }]
+        }))
+        .unwrap();
+
+        let merged = merge_works(vec![provider], vec![curated]);
+
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].provider_match);
+        assert_eq!(merged[0].curated_sources.len(), 1);
     }
 }

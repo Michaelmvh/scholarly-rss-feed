@@ -268,6 +268,7 @@ mod tests {
             abstract_text_override: None,
             alternate_links: Vec::new(),
             matched_author_names: Vec::new(),
+            provider_match: false,
             curated_sources: vec![CuratedSource {
                 key: Some("example".to_string()),
                 name: "Example".to_string(),

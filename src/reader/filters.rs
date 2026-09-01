@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 pub(super) const PERIOD_PARAM: &str = "view_period";
 pub(super) const AUTHOR_PARAM: &str = "view_author";
 pub(super) const SOURCE_PARAM: &str = "view_source";
+pub(super) const EXCLUDE_CURATED_ONLY: &str = "exclude-curated-only";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Period {
@@ -34,7 +35,7 @@ impl Period {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct ViewFilters {
     pub period: Option<Period>,
-    pub author: Option<String>,
+    pub authors: Vec<String>,
     pub source: Option<String>,
 }
 
@@ -42,24 +43,21 @@ impl ViewFilters {
     pub(super) fn from_params(params: &[(String, String)]) -> Self {
         Self {
             period: value(params, PERIOD_PARAM).and_then(parse_period),
-            author: nonempty_value(params, AUTHOR_PARAM),
+            authors: values(params, AUTHOR_PARAM),
             source: nonempty_value(params, SOURCE_PARAM),
         }
     }
 
     pub(super) fn validated(mut self, options: &FilterOptions) -> Self {
-        if self
-            .author
-            .as_ref()
-            .is_some_and(|author| !options.authors.contains_key(author))
-        {
-            self.author = None;
-        }
-        if self
-            .source
-            .as_ref()
-            .is_some_and(|source| !options.sources.contains_key(source))
-        {
+        self.authors
+            .retain(|author| options.authors.contains_key(author));
+        if self.source.as_ref().is_some_and(|source| {
+            if source == EXCLUDE_CURATED_ONLY {
+                !options.can_exclude_collection_only
+            } else {
+                !options.sources.contains_key(source)
+            }
+        }) {
             self.source = None;
         }
         self
@@ -73,17 +71,22 @@ impl ViewFilters {
                 .and_then(parse_date)
                 .is_some_and(|date| date >= today - Duration::days(period.days()))
         });
-        let author_matches = self.author.as_ref().is_none_or(|selected| {
-            publication
-                .authors
-                .iter()
-                .any(|author| author.matched_feed && &author.filter_id == selected)
-        });
+        let author_matches = self.authors.is_empty()
+            || self.authors.iter().any(|selected| {
+                publication
+                    .authors
+                    .iter()
+                    .any(|author| author.matched_feed && &author.filter_id == selected)
+            });
         let source_matches = self.source.as_ref().is_none_or(|selected| {
-            publication
-                .curated_sources
-                .iter()
-                .any(|source| source.key.as_ref() == Some(selected))
+            if selected == EXCLUDE_CURATED_ONLY {
+                publication.provider_match
+            } else {
+                publication
+                    .curated_sources
+                    .iter()
+                    .any(|source| source.key.as_ref() == Some(selected))
+            }
         });
 
         date_matches && author_matches && source_matches
@@ -94,6 +97,7 @@ impl ViewFilters {
 pub(super) struct FilterOptions {
     pub authors: BTreeMap<String, String>,
     pub sources: BTreeMap<String, String>,
+    pub can_exclude_collection_only: bool,
 }
 
 impl FilterOptions {
@@ -117,6 +121,14 @@ impl FilterOptions {
                 }
             }
         }
+        options.can_exclude_collection_only = feed
+            .publications
+            .iter()
+            .any(|publication| !publication.curated_sources.is_empty())
+            && feed
+                .publications
+                .iter()
+                .any(|publication| publication.provider_match);
         options
     }
 }
@@ -139,6 +151,19 @@ fn nonempty_value(params: &[(String, String)], name: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+fn values(params: &[(String, String)], name: &str) -> Vec<String> {
+    let mut values = params
+        .iter()
+        .filter(|(key, _)| key == name)
+        .map(|(_, value)| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    values.sort();
+    values.dedup();
+    values
+}
+
 fn parse_period(value: &str) -> Option<Period> {
     match value {
         "30d" => Some(Period::Days30),
@@ -155,7 +180,7 @@ fn parse_date(value: &str) -> Option<NaiveDate> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reader::{Author, Publication};
+    use crate::reader::{Attribution, Author, Publication};
 
     fn publication(date: Option<&str>) -> Publication {
         Publication {
@@ -172,6 +197,7 @@ mod tests {
                 matched_feed: true,
             }],
             abstract_text: None,
+            provider_match: true,
             curated_sources: Vec::new(),
             curated_categories: Vec::new(),
         }
@@ -195,5 +221,39 @@ mod tests {
         let params = vec![(PERIOD_PARAM.to_string(), "recent-ish".to_string())];
 
         assert_eq!(ViewFilters::from_params(&params), ViewFilters::default());
+    }
+
+    #[test]
+    fn repeated_author_filters_are_deduplicated() {
+        let params = vec![
+            (AUTHOR_PARAM.to_string(), "grace hopper".to_string()),
+            (AUTHOR_PARAM.to_string(), "ada lovelace".to_string()),
+            (AUTHOR_PARAM.to_string(), "ada lovelace".to_string()),
+        ];
+
+        assert_eq!(
+            ViewFilters::from_params(&params).authors,
+            vec!["ada lovelace", "grace hopper"]
+        );
+    }
+
+    #[test]
+    fn exclude_collection_only_keeps_provider_collection_overlap() {
+        let mut provider_overlap = publication(Some("2026-08-20"));
+        provider_overlap.curated_sources.push(Attribution {
+            key: Some("collection".to_string()),
+            name: "Collection".to_string(),
+            url: "https://example.com/collection".to_string(),
+        });
+        let mut collection_only = provider_overlap.clone();
+        collection_only.provider_match = false;
+        let filters = ViewFilters {
+            source: Some(EXCLUDE_CURATED_ONLY.to_string()),
+            ..ViewFilters::default()
+        };
+        let today = NaiveDate::from_ymd_opt(2026, 9, 1).unwrap();
+
+        assert!(filters.matches_on(&provider_overlap, today));
+        assert!(!filters.matches_on(&collection_only, today));
     }
 }

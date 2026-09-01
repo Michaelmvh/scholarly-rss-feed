@@ -1,7 +1,9 @@
 mod filters;
 mod render;
 
-pub use render::{article_id_from_path, render_article, render_feed, FAVICON, READER_CSS};
+pub use render::{
+    article_id_from_path, render_article, render_feed, FAVICON, READER_CSS, READER_JS,
+};
 
 #[derive(Clone, Debug)]
 pub struct Feed {
@@ -21,6 +23,7 @@ pub struct Publication {
     pub venue: Option<String>,
     pub authors: Vec<Author>,
     pub abstract_text: Option<String>,
+    pub provider_match: bool,
     pub curated_sources: Vec<Attribution>,
     pub curated_categories: Vec<String>,
 }

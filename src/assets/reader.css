@@ -19,12 +19,26 @@ h2 a { color: inherit; text-decoration-color: #9db8b3; }
 .author-key, .author-note { margin: .75rem 0 0; font: .8rem/1.45 ui-sans-serif, system-ui, sans-serif; color: #625e57; }
 .filters { margin-top: 1.5rem; padding-top: 1.25rem; border-top: 1px solid #d8d2c7; font: .82rem/1.4 ui-sans-serif, system-ui, sans-serif; }
 .filter-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; }
-.filters label { display: grid; gap: .4rem; color: #625e57; font-size: .7rem; font-weight: 700; letter-spacing: .055em; text-transform: uppercase; }
+.filter-select { display: grid; gap: .4rem; color: #625e57; font-size: .7rem; font-weight: 700; letter-spacing: .055em; text-transform: uppercase; }
 .filters select { min-width: 0; width: 100%; padding: .6rem .7rem; border: 1px solid #c9c2b6; border-radius: .2rem; background: #fbfaf7; color: #272522; font: 500 .9rem/1.3 ui-sans-serif, system-ui, sans-serif; letter-spacing: normal; text-transform: none; }
-.filters select:focus, .filter-actions button:focus-visible { outline: 2px solid #9db8b3; outline-offset: 2px; }
+.filters select:focus, .filter-multiselect summary:focus-visible, .filter-actions button:focus-visible { outline: 2px solid #9db8b3; outline-offset: 2px; }
+.filter-multiselect { position: relative; min-width: 0; }
+.filter-multiselect summary { display: grid; gap: .4rem; padding: 0; color: #625e57; cursor: pointer; list-style: none; }
+.filter-multiselect summary::-webkit-details-marker { display: none; }
+.filter-label { font-size: .7rem; font-weight: 700; letter-spacing: .055em; text-transform: uppercase; }
+.filter-value { overflow: hidden; padding: .6rem 2rem .6rem .7rem; border: 1px solid #c9c2b6; border-radius: .2rem; background: #fbfaf7; color: #272522; font-size: .9rem; font-weight: 500; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+.filter-multiselect summary::after { position: absolute; right: .75rem; bottom: .72rem; border: solid #625e57; border-width: 0 1px 1px 0; content: ""; padding: .2rem; transform: rotate(45deg); }
+.filter-multiselect[open] summary::after { bottom: .55rem; transform: rotate(225deg); }
+.filter-options { position: absolute; z-index: 2; top: calc(100% + .35rem); left: 0; width: min(22rem, 90vw); max-height: 18rem; overflow-y: auto; padding: .35rem; border: 1px solid #c9c2b6; border-radius: .2rem; background: #fbfaf7; box-shadow: 0 .5rem 1.5rem rgb(39 37 34 / 12%); }
+.filter-checkbox { display: flex; align-items: center; gap: .55rem; padding: .45rem .5rem; border-radius: .15rem; color: #272522; cursor: pointer; font-size: .88rem; }
+.filter-checkbox:hover { background: #eeebe4; }
+.filter-checkbox input { width: 1rem; height: 1rem; margin: 0; accent-color: #175e54; }
+.filter-select-all { margin-bottom: .25rem; border-bottom: 1px solid #d8d2c7; border-radius: 0; padding-bottom: .65rem; font-weight: 700; }
 .filter-actions { display: flex; align-items: center; gap: 1rem; margin-top: 1rem; }
 .filter-actions button { padding: .55rem .8rem; border: 1px solid #175e54; border-radius: .2rem; background: transparent; color: #175e54; font: inherit; font-weight: 700; cursor: pointer; }
 .filter-actions button:hover { background: #175e54; color: #fff; }
+.filters-enhanced .apply-filters { display: none; }
+.filters-enhanced .filter-actions.no-clear { display: none; }
 .clear-filters { font-weight: 650; }
 .provenance { margin: .75rem 0 0; font: .78rem/1.5 ui-sans-serif, system-ui, sans-serif; color: #625e57; }
 .empty { padding: 3rem 0; color: #625e57; }

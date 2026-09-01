@@ -309,7 +309,10 @@ async fn run_curated_comparison(
             &request.from,
         ),
     );
-    let provider_works = provider_works?;
+    let mut provider_works = provider_works?;
+    for work in &mut provider_works {
+        work.provider_match = true;
+    }
     let curated_evaluation = curated_evaluation?;
     let report = evaluation::compare(
         &provider_works,
@@ -348,6 +351,16 @@ async fn serve_feed(request: Request<Incoming>) -> Result<Response<Full<Bytes>>,
             )
             .status(StatusCode::OK)
             .body(Full::new(Bytes::from_static(reader::READER_CSS.as_bytes())));
+    }
+    if request.uri().path() == "/reader.js" {
+        return Response::builder()
+            .header("Content-Type", "text/javascript; charset=utf-8")
+            .header(
+                "Cache-Control",
+                "public, max-age=300, s-maxage=7200, stale-while-revalidate=86400",
+            )
+            .status(StatusCode::OK)
+            .body(Full::new(Bytes::from_static(reader::READER_JS.as_bytes())));
     }
     if request.uri().path() == "/apple-touch-icon.png" {
         return Response::builder()
@@ -974,7 +987,10 @@ async fn fetch_works(request: &FeedRequest) -> Result<Vec<Work>, String> {
         fetch_provider_works(request),
         curated::fetch_sources(&CLIENT, &request.curated_sources, &request.from),
     );
-    let provider_works = provider_works?;
+    let mut provider_works = provider_works?;
+    for work in &mut provider_works {
+        work.provider_match = true;
+    }
     let mut curated_works = curated_works?;
     if request.provider == Provider::OpenAlex && !curated_works.is_empty() {
         curated_works =
@@ -1254,6 +1270,7 @@ fn work_to_publication(work: &Work) -> reader::Publication {
         venue: work.venue(),
         authors,
         abstract_text: work.abstract_text(),
+        provider_match: work.provider_match,
         curated_sources: work
             .curated_sources
             .iter()

@@ -456,6 +456,7 @@ impl PendingPaper {
             abstract_text_override: None,
             alternate_links: Vec::new(),
             matched_author_names: Vec::new(),
+            provider_match: false,
             curated_sources: vec![CuratedSource {
                 key: Some(PELDOM_PROTEIN_DESIGN.to_string()),
                 name: PELDOM_SOURCE_NAME.to_string(),
