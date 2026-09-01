@@ -53,6 +53,7 @@ lazy_static! {
 static CONFIG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 const DEFAULT_FROM_DAYS: u32 = 365;
+const APPLE_TOUCH_ICON: &[u8] = include_bytes!("assets/apple-touch-icon.png");
 
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
 enum Provider {
@@ -337,6 +338,16 @@ async fn serve_feed(request: Request<Incoming>) -> Result<Response<Full<Bytes>>,
             )
             .status(StatusCode::OK)
             .body(Full::new(Bytes::from_static(reader::FAVICON.as_bytes())));
+    }
+    if request.uri().path() == "/apple-touch-icon.png" {
+        return Response::builder()
+            .header("Content-Type", "image/png")
+            .header(
+                "Cache-Control",
+                "public, max-age=300, s-maxage=7200, stale-while-revalidate=86400",
+            )
+            .status(StatusCode::OK)
+            .body(Full::new(Bytes::from_static(APPLE_TOUCH_ICON)));
     }
 
     // Preserve repeated query params (e.g. multiple ?author_id=).
