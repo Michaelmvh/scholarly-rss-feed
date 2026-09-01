@@ -458,6 +458,9 @@ impl PendingPaper {
             best_oa_location: None,
             abstract_inverted_index: None,
             abstract_text_override: None,
+            license: None,
+            full_text_url: None,
+            published_doi: None,
             alternate_links: Vec::new(),
             matched_author_names: Vec::new(),
             discovery_sources: vec![DiscoverySource::curated_collection(

@@ -48,6 +48,12 @@ pub struct Work {
     #[serde(default)]
     pub abstract_text_override: Option<String>,
     #[serde(default)]
+    pub license: Option<String>,
+    #[serde(default)]
+    pub full_text_url: Option<String>,
+    #[serde(default)]
+    pub published_doi: Option<String>,
+    #[serde(default)]
     pub alternate_links: Vec<String>,
     #[serde(default)]
     pub matched_author_names: Vec<String>,

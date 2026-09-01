@@ -238,6 +238,9 @@ fn result_to_work(result: ScholarResult, queried_author: &str) -> Work {
         abstract_inverted_index: None,
         abstract_text_override: (!result.abstract_text.trim().is_empty())
             .then_some(result.abstract_text),
+        license: None,
+        full_text_url: None,
+        published_doi: None,
         alternate_links: Vec::new(),
         matched_author_names,
         discovery_sources: Vec::new(),

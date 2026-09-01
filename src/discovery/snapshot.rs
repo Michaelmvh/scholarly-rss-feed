@@ -36,6 +36,16 @@ impl<M> DiscoverySnapshot<M> {
         (self.works, self.metadata)
     }
 
+    pub fn metadata(&self) -> &M {
+        &self.metadata
+    }
+
+    pub fn into_works_since(self, retention_from: &str) -> Result<Vec<Work>, String> {
+        let retention_from = parse_date(retention_from, "retention date")?;
+        validate_work_dates(&self.works)?;
+        Ok(retain_works(self.works, retention_from))
+    }
+
     pub fn refresh_from(&self, fallback_from: &str, overlap_days: u32) -> Result<String, String> {
         let fallback = parse_date(fallback_from, "fallback refresh date")?;
         let Some(covered_through) = self.covered_through.as_deref() else {
@@ -126,7 +136,7 @@ pub fn resolve_refresh<M>(
             })();
             let retention_from = match validation {
                 Ok(date) => date,
-                Err(error) => return stale_or_error(previous, error),
+                Err(error) => return stale_or_error(previous, error, retention_from),
             };
             let previous_works = retain_works(
                 previous.map(|snapshot| snapshot.works).unwrap_or_default(),
@@ -142,16 +152,22 @@ pub fn resolve_refresh<M>(
                 batch.metadata,
             )))
         }
-        Err(error) => stale_or_error(previous, error),
+        Err(error) => stale_or_error(previous, error, retention_from),
     }
 }
 
 fn stale_or_error<M>(
     previous: Option<DiscoverySnapshot<M>>,
     error: String,
+    retention_from: &str,
 ) -> Result<RefreshOutcome<M>, String> {
     match previous {
-        Some(snapshot) => Ok(RefreshOutcome::Stale { snapshot, error }),
+        Some(mut snapshot) => {
+            let retention_from = parse_date(retention_from, "retention date")?;
+            validate_work_dates(&snapshot.works)?;
+            snapshot.works = retain_works(snapshot.works, retention_from);
+            Ok(RefreshOutcome::Stale { snapshot, error })
+        }
         None => Err(error),
     }
 }
@@ -375,7 +391,18 @@ mod tests {
 
     #[test]
     fn refresh_failure_returns_explicit_stale_outcome() {
-        let previous = DiscoverySnapshot::new("source", 1, None, Vec::new(), ());
+        let previous = DiscoverySnapshot::new(
+            "source",
+            1,
+            None,
+            vec![work(
+                "old",
+                "https://doi.org/10.1000/old",
+                "2025-01-01",
+                DiscoverySource::openalex(),
+            )],
+            (),
+        );
 
         let outcome = resolve_refresh(
             "source",
@@ -387,7 +414,12 @@ mod tests {
         .unwrap();
 
         match outcome {
-            RefreshOutcome::Stale { error, .. } => assert_eq!(error, "unavailable"),
+            RefreshOutcome::Stale {
+                snapshot, error, ..
+            } => {
+                assert_eq!(error, "unavailable");
+                assert!(snapshot.works.is_empty());
+            }
             RefreshOutcome::Updated(_) => panic!("expected stale snapshot"),
         }
     }

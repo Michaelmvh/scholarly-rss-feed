@@ -257,6 +257,15 @@ fn merge_work_version(existing: &mut Work, mut candidate: Work) {
         .collection_date
         .take()
         .or_else(|| candidate.collection_date.take());
+    let license = existing.license.take().or_else(|| candidate.license.take());
+    let full_text_url = existing
+        .full_text_url
+        .take()
+        .or_else(|| candidate.full_text_url.take());
+    let published_doi = existing
+        .published_doi
+        .take()
+        .or_else(|| candidate.published_doi.take());
     let mut matched_author_names = std::mem::take(&mut existing.matched_author_names);
     matched_author_names.append(&mut candidate.matched_author_names);
     matched_author_names.sort();
@@ -286,6 +295,9 @@ fn merge_work_version(existing: &mut Work, mut candidate: Work) {
     existing.alternate_links = alternate_links;
     existing.latest_version_date = latest_version_date;
     existing.collection_date = collection_date;
+    existing.license = license;
+    existing.full_text_url = full_text_url;
+    existing.published_doi = published_doi;
     existing.matched_author_names = matched_author_names;
     existing.discovery_sources = discovery_sources;
     existing.curated_categories = curated_categories;
@@ -337,6 +349,9 @@ mod tests {
             best_oa_location: None,
             abstract_inverted_index: None,
             abstract_text_override: None,
+            license: None,
+            full_text_url: None,
+            published_doi: None,
             alternate_links: Vec::new(),
             matched_author_names: Vec::new(),
             discovery_sources: Vec::new(),

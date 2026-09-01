@@ -46,6 +46,18 @@ impl DiscoverySource {
         }
     }
 
+    pub fn biorxiv_category(key: &str, label: &str) -> Self {
+        Self {
+            kind: DiscoverySourceKind::Biorxiv,
+            key: format!("biorxiv:{key}"),
+            label: format!("bioRxiv: {label}"),
+            url: Some(format!(
+                "https://www.biorxiv.org/collection/{}",
+                key.replace('_', "-")
+            )),
+        }
+    }
+
     pub fn is_curated_collection(&self) -> bool {
         self.kind == DiscoverySourceKind::CuratedCollection
     }

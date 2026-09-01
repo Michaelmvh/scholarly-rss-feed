@@ -30,6 +30,9 @@ pub struct FeedConfig {
     /// Curated paper collections merged into this feed.
     #[serde(default)]
     pub curated_sources: Vec<String>,
+    /// bioRxiv subject categories discovered through the native API.
+    #[serde(default)]
+    pub biorxiv_categories: Vec<String>,
     /// Legacy OpenAlex author IDs.
     #[serde(default)]
     pub author_ids: Vec<String>,
