@@ -243,6 +243,16 @@ fn normalize_title(title: &str) -> String {
 }
 
 fn merge_work_version(existing: &mut Work, mut candidate: Work) {
+    let latest_version_date = [
+        existing.latest_version_date.as_deref(),
+        existing.publication_date.as_deref(),
+        candidate.latest_version_date.as_deref(),
+        candidate.publication_date.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .map(str::to_string);
     let collection_date = existing
         .collection_date
         .take()
@@ -274,6 +284,7 @@ fn merge_work_version(existing: &mut Work, mut candidate: Work) {
     alternate_links.sort();
     alternate_links.dedup();
     existing.alternate_links = alternate_links;
+    existing.latest_version_date = latest_version_date;
     existing.collection_date = collection_date;
     existing.matched_author_names = matched_author_names;
     existing.discovery_sources = discovery_sources;
@@ -307,6 +318,7 @@ mod tests {
             title: Some("Curated paper".to_string()),
             display_name: None,
             publication_date: Some("2026-01-01".to_string()),
+            latest_version_date: None,
             collection_date: None,
             cited_by_count: None,
             authorships: Some(

@@ -37,6 +37,8 @@ pub struct Work {
     pub display_name: Option<String>,
     pub publication_date: Option<String>,
     #[serde(default)]
+    pub latest_version_date: Option<String>,
+    #[serde(default)]
     pub collection_date: Option<CollectionDate>,
     pub cited_by_count: Option<u64>,
     pub authorships: Option<Vec<Authorship>>,
@@ -97,6 +99,17 @@ impl Work {
         self.discovery_sources
             .iter()
             .filter(|source| source.is_curated_collection())
+    }
+
+    pub fn retention_date(&self) -> Option<&str> {
+        [
+            self.latest_version_date.as_deref(),
+            self.publication_date.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+        .or_else(|| self.collection_date.as_ref().map(|date| date.date.as_str()))
     }
 
     /// Best available human-readable title.

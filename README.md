@@ -209,6 +209,10 @@ Set `GSRF_CACHE_DIR` to persist the complete parsed source snapshot, including c
 provenance, across restarts. Docker uses `/cache`; both Compose files mount the
 `scholar-rss-cache` named volume there. Snapshot replacement is atomic, malformed or undersized
 snapshots are rejected, and a network failure uses the last successfully parsed snapshot.
+Persistent discovery snapshots use a versioned envelope that records their source, schema,
+refresh time, coverage date, works, and source-specific cursor metadata. Native repository
+integrations can therefore refresh overlapping date windows, merge duplicates, and enforce
+retention without rebuilding their full history.
 
 Curated coverage can be evaluated independently of generated feed output:
 

@@ -247,6 +247,7 @@ mod tests {
             title: Some(title.to_string()),
             display_name: None,
             publication_date: Some("2026-01-01".to_string()),
+            latest_version_date: None,
             collection_date: None,
             cited_by_count: None,
             authorships: Some(vec![Authorship {

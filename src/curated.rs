@@ -1,3 +1,4 @@
+use crate::discovery::snapshot::DiscoverySnapshot;
 use crate::openalex::{Author, Authorship, Location, Source, Work};
 use crate::provenance::DiscoverySource;
 use hyper::header::{ETAG, IF_NONE_MATCH};
@@ -19,7 +20,8 @@ const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MIN_EXPECTED_PAPERS: usize = 100;
 const REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const KNOWN_IRRELEVANT_IDS: &[&str] = &["arxiv:2602.23956"];
-const SNAPSHOT_FILE: &str = "peldom-snapshot-v2.json";
+const SNAPSHOT_FILE: &str = "peldom-snapshot-v3.json";
+const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 
 lazy_static! {
     static ref PELDOM_SNAPSHOT: Arc<RwLock<Option<Snapshot>>> = Arc::new(RwLock::new(None));
@@ -46,9 +48,8 @@ pub struct SourceDiagnostics {
 }
 
 #[derive(Deserialize, Serialize)]
-struct PersistedSnapshot {
+struct PersistedMetadata {
     etag: Option<String>,
-    works: Vec<Work>,
     diagnostics: SourceDiagnostics,
 }
 
@@ -159,21 +160,28 @@ async fn fetch_peldom(client: &reqwest::Client) -> Result<Snapshot, String> {
 }
 
 fn load_persisted_snapshot() -> Option<Snapshot> {
-    match crate::snapshot_store::load::<PersistedSnapshot>(SNAPSHOT_FILE) {
-        Ok(Some(snapshot)) if snapshot.works.len() >= MIN_EXPECTED_PAPERS => Some(Snapshot {
-            etag: snapshot.etag,
-            checked_at: Instant::now()
-                .checked_sub(REFRESH_INTERVAL)
-                .unwrap_or_else(Instant::now),
-            works: snapshot.works,
-            diagnostics: snapshot.diagnostics,
-        }),
+    match DiscoverySnapshot::<PersistedMetadata>::load(
+        SNAPSHOT_FILE,
+        PELDOM_PROTEIN_DESIGN,
+        SNAPSHOT_SCHEMA_VERSION,
+    ) {
         Ok(Some(snapshot)) => {
-            eprintln!(
-                "Ignoring persisted Peldom snapshot with only {} papers",
-                snapshot.works.len()
-            );
-            None
+            let (works, metadata) = snapshot.into_parts();
+            if works.len() < MIN_EXPECTED_PAPERS {
+                eprintln!(
+                    "Ignoring persisted Peldom snapshot with only {} papers",
+                    works.len()
+                );
+                return None;
+            }
+            Some(Snapshot {
+                etag: metadata.etag,
+                checked_at: Instant::now()
+                    .checked_sub(REFRESH_INTERVAL)
+                    .unwrap_or_else(Instant::now),
+                works,
+                diagnostics: metadata.diagnostics,
+            })
         }
         Ok(None) => None,
         Err(error) => {
@@ -184,14 +192,17 @@ fn load_persisted_snapshot() -> Option<Snapshot> {
 }
 
 fn persist_snapshot(snapshot: &Snapshot) -> Result<(), String> {
-    crate::snapshot_store::save(
-        SNAPSHOT_FILE,
-        &PersistedSnapshot {
+    DiscoverySnapshot::new(
+        PELDOM_PROTEIN_DESIGN,
+        SNAPSHOT_SCHEMA_VERSION,
+        None,
+        snapshot.works.clone(),
+        PersistedMetadata {
             etag: snapshot.etag.clone(),
-            works: snapshot.works.clone(),
             diagnostics: snapshot.diagnostics.clone(),
         },
     )
+    .save(SNAPSHOT_FILE)
 }
 
 fn fresh_snapshot() -> Option<Snapshot> {
@@ -423,6 +434,7 @@ impl PendingPaper {
             title: Some(self.title),
             display_name: None,
             publication_date,
+            latest_version_date: None,
             collection_date: None,
             cited_by_count: None,
             authorships: Some(

@@ -1,5 +1,6 @@
 mod config;
 mod curated;
+pub mod discovery;
 mod evaluation;
 mod github_history;
 mod google_scholar;
