@@ -56,6 +56,8 @@ pub struct Work {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct CuratedSource {
+    #[serde(default)]
+    pub key: Option<String>,
     pub name: String,
     pub url: String,
 }

@@ -1221,6 +1221,7 @@ fn work_to_publication(work: &Work) -> reader::Publication {
                 .as_ref()
                 .and_then(|author| author.display_name.clone())
                 .or_else(|| authorship.raw_author_name.clone())?;
+            let filter_id = normalize_author_name(&display_name);
             let matched_feed = authorship
                 .author
                 .as_ref()
@@ -1232,6 +1233,7 @@ fn work_to_publication(work: &Work) -> reader::Publication {
 
             Some(reader::Author {
                 name: display_name,
+                filter_id,
                 matched_feed,
             })
         })
@@ -1256,6 +1258,7 @@ fn work_to_publication(work: &Work) -> reader::Publication {
             .curated_sources
             .iter()
             .map(|source| reader::Attribution {
+                key: source.key.clone(),
                 name: source.name.clone(),
                 url: source.url.clone(),
             })

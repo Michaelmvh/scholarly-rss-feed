@@ -269,6 +269,7 @@ mod tests {
             alternate_links: Vec::new(),
             matched_author_names: Vec::new(),
             curated_sources: vec![CuratedSource {
+                key: Some("example".to_string()),
                 name: "Example".to_string(),
                 url: "https://example.com".to_string(),
             }],

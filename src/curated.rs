@@ -88,7 +88,16 @@ pub async fn fetch_sources_for_evaluation(
     for source_name in source_names {
         match source_name.as_str() {
             PELDOM_PROTEIN_DESIGN => {
-                let snapshot = fetch_peldom(client).await?;
+                let mut snapshot = fetch_peldom(client).await?;
+                for work in &mut snapshot.works {
+                    for source in &mut work.curated_sources {
+                        if source.url == PELDOM_REPOSITORY_URL {
+                            source
+                                .key
+                                .get_or_insert_with(|| PELDOM_PROTEIN_DESIGN.to_string());
+                        }
+                    }
+                }
                 works.extend(snapshot.works);
                 diagnostics.push(snapshot.diagnostics);
             }
@@ -448,6 +457,7 @@ impl PendingPaper {
             alternate_links: Vec::new(),
             matched_author_names: Vec::new(),
             curated_sources: vec![CuratedSource {
+                key: Some(PELDOM_PROTEIN_DESIGN.to_string()),
                 name: PELDOM_SOURCE_NAME.to_string(),
                 url: PELDOM_REPOSITORY_URL.to_string(),
             }],

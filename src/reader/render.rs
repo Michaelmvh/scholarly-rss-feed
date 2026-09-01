@@ -1,3 +1,6 @@
+use super::filters::{
+    is_view_param, FilterOptions, Period, ViewFilters, AUTHOR_PARAM, PERIOD_PARAM, SOURCE_PARAM,
+};
 use super::{Author, Feed, Publication};
 
 pub const FAVICON: &str = include_str!("../assets/apple-touch-icon.svg");
@@ -7,15 +10,26 @@ pub fn render_feed(feed: &Feed, params: &[(String, String)]) -> String {
     let title = escape_html(&feed.title);
     let description = escape_html(&feed.description);
     let rss_url = escape_html(&raw_feed_url(params));
-    let item_count = feed.publications.len();
-    let item_label = if item_count == 1 {
+    let options = FilterOptions::from_feed(feed);
+    let filters = ViewFilters::from_params(params).validated(&options);
+    let today = chrono::Utc::now().date_naive();
+    let publications = feed
+        .publications
+        .iter()
+        .filter(|publication| filters.matches_on(publication, today))
+        .collect::<Vec<_>>();
+    let item_count = publications.len();
+    let item_label = if filters != ViewFilters::default() {
+        format!("{item_count} of {} publications", feed.publications.len())
+    } else if item_count == 1 {
         "1 publication".to_string()
     } else {
         format!("{item_count} publications")
     };
+    let filter_form = render_filter_form(params, &filters, &options);
 
     let mut articles = String::new();
-    for publication in &feed.publications {
+    for publication in publications {
         let title_markup = match publication.id.as_deref() {
             Some(article_id) => format!(
                 r#"<a href="{}">{}</a>"#,
@@ -62,7 +76,7 @@ pub fn render_feed(feed: &Feed, params: &[(String, String)]) -> String {
   <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
   <link rel="alternate" type="application/rss+xml" title="{title}" href="{rss_url}">
   <title>{title}</title>
-  <link rel="stylesheet" href="/reader.css">
+  <link rel="stylesheet" href="/reader.css?v=2">
 </head>
 <body>
   <main>
@@ -71,6 +85,7 @@ pub fn render_feed(feed: &Feed, params: &[(String, String)]) -> String {
       <p class="intro">{description}</p>
       <p class="feed-meta"><span>{item_label}</span><a href="{rss_url}">View raw RSS</a></p>
       {author_key}
+      {filter_form}
     </header>
     <ol class="publication-list">
       {articles}
@@ -141,7 +156,7 @@ pub fn render_article(
   <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
   <link rel="alternate" type="application/rss+xml" title="{feed_title}" href="{rss_url}">
   <title>{item_title} · {feed_title}</title>
-  <link rel="stylesheet" href="/reader.css">
+  <link rel="stylesheet" href="/reader.css?v=2">
 </head>
 <body>
   <main>
@@ -245,8 +260,111 @@ fn render_provenance(publication: &Publication) -> String {
     format!(r#"<p class="provenance">Curated by {sources}{categories}</p>"#)
 }
 
+fn render_filter_form(
+    params: &[(String, String)],
+    filters: &ViewFilters,
+    options: &FilterOptions,
+) -> String {
+    let hidden_params = params
+        .iter()
+        .filter(|(name, _)| name != "rss" && name != "article" && !is_view_param(name))
+        .map(|(name, value)| {
+            format!(
+                r#"<input type="hidden" name="{}" value="{}">"#,
+                escape_html(name),
+                escape_html(value)
+            )
+        })
+        .collect::<String>();
+    let periods = [
+        (None, "All available"),
+        (Some(Period::Days30), "Past 30 days"),
+        (Some(Period::Days90), "Past 90 days"),
+        (Some(Period::Year1), "Past year"),
+    ]
+    .into_iter()
+    .map(|(period, label)| {
+        render_option(
+            period.map(Period::value).unwrap_or_default(),
+            label,
+            filters.period == period,
+        )
+    })
+    .collect::<String>();
+    let author_filter = render_filter_select(
+        "Tracked author",
+        AUTHOR_PARAM,
+        "Any tracked author",
+        filters.author.as_deref(),
+        &options.authors,
+    );
+    let source_filter = render_filter_select(
+        "Curated collection",
+        SOURCE_PARAM,
+        "Any curated collection",
+        filters.source.as_deref(),
+        &options.sources,
+    );
+    let clear_link = if filters == &ViewFilters::default() {
+        String::new()
+    } else {
+        format!(
+            r#"<a class="clear-filters" href="{}">Clear filters</a>"#,
+            escape_html(&unfiltered_reader_url(params))
+        )
+    };
+
+    format!(
+        r#"<form class="filters" method="get" action="/">
+        {hidden_params}
+        <div class="filter-fields">
+          <label>Publication date<select name="{PERIOD_PARAM}">{periods}</select></label>
+          {author_filter}
+          {source_filter}
+        </div>
+        <div class="filter-actions"><button type="submit">Apply filters</button>{clear_link}</div>
+      </form>"#
+    )
+}
+
+fn render_filter_select(
+    label: &str,
+    name: &str,
+    empty_label: &str,
+    selected: Option<&str>,
+    options: &std::collections::BTreeMap<String, String>,
+) -> String {
+    if options.is_empty() {
+        return String::new();
+    }
+
+    let mut options = options.iter().collect::<Vec<_>>();
+    options.sort_by(|left, right| left.1.cmp(right.1));
+    let options =
+        std::iter::once(render_option("", empty_label, selected.is_none()))
+            .chain(options.into_iter().map(|(value, label)| {
+                render_option(value, label, selected == Some(value.as_str()))
+            }))
+            .collect::<String>();
+
+    format!(
+        r#"<label>{}<select name="{}">{options}</select></label>"#,
+        escape_html(label),
+        escape_html(name)
+    )
+}
+
+fn render_option(value: &str, label: &str, selected: bool) -> String {
+    let selected = if selected { " selected" } else { "" };
+    format!(
+        r#"<option value="{}"{selected}>{}</option>"#,
+        escape_html(value),
+        escape_html(label)
+    )
+}
+
 fn raw_feed_url(params: &[(String, String)]) -> String {
-    let query = feed_query(params);
+    let query = feed_query(params, false);
     if query.is_empty() {
         String::from("?rss")
     } else {
@@ -255,16 +373,25 @@ fn raw_feed_url(params: &[(String, String)]) -> String {
 }
 
 fn reader_url(params: &[(String, String)]) -> String {
-    let query = feed_query(params);
+    let query = feed_query(params, true);
     if query.is_empty() {
         String::from("/")
     } else {
-        format!("?{query}")
+        format!("/?{query}")
+    }
+}
+
+fn unfiltered_reader_url(params: &[(String, String)]) -> String {
+    let query = feed_query(params, false);
+    if query.is_empty() {
+        String::from("/")
+    } else {
+        format!("/?{query}")
     }
 }
 
 fn article_url(params: &[(String, String)], article_id: &str) -> String {
-    let query = feed_query(params);
+    let query = feed_query(params, true);
     let path = format!("/article/{}", encode_article_id(article_id));
     if query.is_empty() {
         path
@@ -310,12 +437,11 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-fn feed_query(params: &[(String, String)]) -> String {
+fn feed_query(params: &[(String, String)], include_view_params: bool) -> String {
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    for (name, value) in params
-        .iter()
-        .filter(|(name, _)| name != "rss" && name != "article")
-    {
+    for (name, value) in params.iter().filter(|(name, _)| {
+        name != "rss" && name != "article" && (include_view_params || !is_view_param(name))
+    }) {
         serializer.append_pair(name, value);
     }
     serializer.finish()
@@ -363,19 +489,23 @@ mod tests {
                 authors: vec![
                     Author {
                         name: "Ada Lovelace".to_string(),
+                        filter_id: "ada lovelace".to_string(),
                         matched_feed: true,
                     },
                     Author {
                         name: "Grace Hopper".to_string(),
+                        filter_id: "grace-hopper".to_string(),
                         matched_feed: true,
                     },
                     Author {
                         name: "Alan Turing".to_string(),
+                        filter_id: "alan-turing".to_string(),
                         matched_feed: false,
                     },
                 ],
                 abstract_text: Some("<strong>abstract</strong>".to_string()),
                 curated_sources: vec![Attribution {
+                    key: Some("curated-source".to_string()),
                     name: "Curated Source".to_string(),
                     url: "https://example.com/source?a=1&b=2".to_string(),
                 }],
@@ -389,10 +519,70 @@ mod tests {
         let params = vec![
             ("feed".to_string(), "my field".to_string()),
             ("author_id".to_string(), "A1".to_string()),
+            (PERIOD_PARAM.to_string(), "90d".to_string()),
+            (AUTHOR_PARAM.to_string(), "ada-lovelace".to_string()),
         ];
 
         assert_eq!(raw_feed_url(&params), "?feed=my+field&author_id=A1&rss");
         assert_eq!(raw_feed_url(&[]), "?rss");
+    }
+
+    #[test]
+    fn filters_publications_by_tracked_author_and_curated_source() {
+        let mut feed = sample_feed();
+        let mut second_publication = feed.publications[0].clone();
+        second_publication.id = Some("https://openalex.org/W2".to_string());
+        second_publication.title = "Second publication".to_string();
+        second_publication.curated_sources.clear();
+        feed.publications.push(second_publication);
+        let params = vec![
+            (AUTHOR_PARAM.to_string(), "ada lovelace".to_string()),
+            (SOURCE_PARAM.to_string(), "curated-source".to_string()),
+        ];
+
+        let html = render_feed(&feed, &params);
+
+        assert!(html.contains("1 of 2 publications"));
+        assert!(html.contains("&lt;script&gt;alert(&#39;title&#39;)&lt;/script&gt;"));
+        assert!(!html.contains("Second publication"));
+        assert!(html.contains(r#"<option value="ada lovelace" selected>Ada Lovelace</option>"#));
+        assert!(html.contains(r#"<option value="curated-source" selected>Curated Source</option>"#));
+        assert!(html.contains("?view_author=ada+lovelace&amp;view_source=curated-source"));
+    }
+
+    #[test]
+    fn unknown_filter_values_are_ignored() {
+        let params = vec![
+            (AUTHOR_PARAM.to_string(), "unknown-author".to_string()),
+            (SOURCE_PARAM.to_string(), "unknown-source".to_string()),
+        ];
+
+        let html = render_feed(&sample_feed(), &params);
+
+        assert!(html.contains("1 publication"));
+        assert!(!html.contains("1 of 1 publications"));
+        assert!(!html.contains("Clear filters"));
+    }
+
+    #[test]
+    fn filters_publications_by_relative_publication_date() {
+        let mut feed = sample_feed();
+        let today = chrono::Utc::now().date_naive();
+        feed.publications[0].publication_date = Some(today.format("%Y-%m-%d").to_string());
+        let mut old_publication = feed.publications[0].clone();
+        old_publication.id = Some("https://openalex.org/W2".to_string());
+        old_publication.title = "Older publication".to_string();
+        old_publication.publication_date = Some(
+            (today - chrono::Duration::days(31))
+                .format("%Y-%m-%d")
+                .to_string(),
+        );
+        feed.publications.push(old_publication);
+
+        let html = render_feed(&feed, &[(PERIOD_PARAM.to_string(), "30d".to_string())]);
+
+        assert!(html.contains("1 of 2 publications"));
+        assert!(!html.contains("Older publication"));
     }
 
     #[test]
@@ -450,7 +640,10 @@ mod tests {
 
     #[test]
     fn article_preview_links_externally_and_highlights_all_matching_authors() {
-        let params = vec![("feed".to_string(), "myfield".to_string())];
+        let params = vec![
+            ("feed".to_string(), "myfield".to_string()),
+            (PERIOD_PARAM.to_string(), "90d".to_string()),
+        ];
         let html = render_article(&sample_feed(), "https://openalex.org/W1", &params).unwrap();
         let document = Html::parse_document(&html);
         let article = Selector::parse("main > article.article-detail").unwrap();
@@ -470,6 +663,7 @@ mod tests {
         assert!(html.contains(
             r#"<strong class="notable-author">Ada Lovelace</strong>, <strong class="notable-author">Grace Hopper</strong>, Alan Turing"#
         ));
+        assert!(html.contains(r#"class="back" href="/?feed=myfield&amp;view_period=90d""#));
     }
 
     #[test]

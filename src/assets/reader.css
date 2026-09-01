@@ -17,6 +17,15 @@ h2 a { color: inherit; text-decoration-color: #9db8b3; }
 .authors { margin: 0; font-size: .9rem; line-height: 1.55; }
 .notable-author { color: #175e54; font-weight: 750; }
 .author-key, .author-note { margin: .75rem 0 0; font: .8rem/1.45 ui-sans-serif, system-ui, sans-serif; color: #625e57; }
+.filters { margin-top: 1.5rem; padding-top: 1.25rem; border-top: 1px solid #d8d2c7; font: .82rem/1.4 ui-sans-serif, system-ui, sans-serif; }
+.filter-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; }
+.filters label { display: grid; gap: .4rem; color: #625e57; font-size: .7rem; font-weight: 700; letter-spacing: .055em; text-transform: uppercase; }
+.filters select { min-width: 0; width: 100%; padding: .6rem .7rem; border: 1px solid #c9c2b6; border-radius: .2rem; background: #fbfaf7; color: #272522; font: 500 .9rem/1.3 ui-sans-serif, system-ui, sans-serif; letter-spacing: normal; text-transform: none; }
+.filters select:focus, .filter-actions button:focus-visible { outline: 2px solid #9db8b3; outline-offset: 2px; }
+.filter-actions { display: flex; align-items: center; gap: 1rem; margin-top: 1rem; }
+.filter-actions button { padding: .55rem .8rem; border: 1px solid #175e54; border-radius: .2rem; background: transparent; color: #175e54; font: inherit; font-weight: 700; cursor: pointer; }
+.filter-actions button:hover { background: #175e54; color: #fff; }
+.clear-filters { font-weight: 650; }
 .provenance { margin: .75rem 0 0; font: .78rem/1.5 ui-sans-serif, system-ui, sans-serif; color: #625e57; }
 .empty { padding: 3rem 0; color: #625e57; }
 .back { display: inline-block; margin-bottom: 2.5rem; font-size: .9rem; }
@@ -30,3 +39,4 @@ h2 a { color: inherit; text-decoration-color: #9db8b3; }
 .secondary-action { display: inline-block; padding: .65rem .95rem; border: 1px solid #175e54; border-radius: .25rem; text-decoration: none; }
 .secondary-action:hover { border-color: #0d3d36; }
 @media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+@media (max-width: 40rem) { .filter-fields { grid-template-columns: 1fr; } }

@@ -1,3 +1,4 @@
+mod filters;
 mod render;
 
 pub use render::{article_id_from_path, render_article, render_feed, FAVICON, READER_CSS};
@@ -27,11 +28,13 @@ pub struct Publication {
 #[derive(Clone, Debug)]
 pub struct Author {
     pub name: String,
+    pub filter_id: String,
     pub matched_feed: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct Attribution {
+    pub key: Option<String>,
     pub name: String,
     pub url: String,
 }
