@@ -48,7 +48,8 @@ h1 { max-width: 18ch; margin: 0 0 .75rem; font-size: clamp(2.25rem, 8vw, 4.5rem)
 .feed-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .75rem; margin: 1.25rem 0 0; font: .85rem/1.4 ui-sans-serif, system-ui, sans-serif; color: #625e57; }
 a { color: #175e54; text-decoration-thickness: .08em; text-underline-offset: .16em; }
 a:hover { color: #0d3d36; }
-article { padding: 2rem 0; border-bottom: 1px solid #d8d2c7; }
+.publication-list { margin: 0; padding: 0; list-style: none; }
+.publication { padding: 2rem 0; border-bottom: 1px solid #d8d2c7; }
 h2 { margin: .35rem 0 .75rem; font-size: clamp(1.35rem, 4vw, 1.8rem); font-weight: 500; line-height: 1.2; letter-spacing: -.015em; }
 h2 a { color: inherit; text-decoration-color: #9db8b3; }
 .metadata, .authors, .back { font-family: ui-sans-serif, system-ui, sans-serif; color: #625e57; }
@@ -100,17 +101,17 @@ pub fn render_feed(feed: &Feed, params: &[(String, String)]) -> String {
         let provenance = render_provenance(publication);
 
         articles.push_str(&format!(
-            r#"<article>
+            r#"<li class="publication">
   <p class="metadata">{date}{separator}{venue}</p>
   <h2>{title_markup}</h2>
   {authors}
   {provenance}
-</article>
+</li>
 "#
         ));
     }
     if articles.is_empty() {
-        articles.push_str(r#"<p class="empty">No recent publications found.</p>"#);
+        articles.push_str(r#"<li class="empty">No recent publications found.</li>"#);
     }
     let author_key = if feed
         .publications
@@ -142,7 +143,9 @@ pub fn render_feed(feed: &Feed, params: &[(String, String)]) -> String {
       <p class="feed-meta"><span>{item_label}</span><a href="{rss_url}">View raw RSS</a></p>
       {author_key}
     </header>
-    {articles}
+    <ol class="publication-list">
+      {articles}
+    </ol>
   </main>
 </body>
 </html>
@@ -321,13 +324,50 @@ fn reader_url(params: &[(String, String)]) -> String {
 }
 
 fn article_url(params: &[(String, String)], article_id: &str) -> String {
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
     let query = feed_query(params);
-    if !query.is_empty() {
-        serializer.extend_pairs(url::form_urlencoded::parse(query.as_bytes()));
+    let path = format!("/article/{}", encode_article_id(article_id));
+    if query.is_empty() {
+        path
+    } else {
+        format!("{path}?{query}")
     }
-    serializer.append_pair("article", article_id);
-    format!("?{}", serializer.finish())
+}
+
+pub fn article_id_from_path(path: &str) -> Option<String> {
+    let encoded = path.strip_prefix("/article/")?;
+    if encoded.is_empty() || encoded.len() % 2 != 0 {
+        return None;
+    }
+
+    let bytes = encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = hex_value(pair[0])?;
+            let low = hex_value(pair[1])?;
+            Some((high << 4) | low)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    String::from_utf8(bytes).ok()
+}
+
+fn encode_article_id(article_id: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(article_id.len() * 2);
+    for byte in article_id.bytes() {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn feed_query(params: &[(String, String)]) -> String {
@@ -365,6 +405,7 @@ fn escape_html(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scraper::{Html, Selector};
 
     fn sample_feed() -> Feed {
         Feed {
@@ -421,7 +462,9 @@ mod tests {
         assert!(html.contains("Research &amp; &lt;Development&gt;"));
         assert!(html.contains("&lt;script&gt;alert(&#39;title&#39;)&lt;/script&gt;"));
         assert!(!html.contains("<script>alert"));
-        assert!(html.contains("article=https%3A%2F%2Fopenalex.org%2FW1"));
+        assert!(
+            html.contains("/article/68747470733a2f2f6f70656e616c65782e6f72672f5731?feed=myfield")
+        );
         assert!(html.contains("href=\"?feed=myfield&amp;rss\""));
         assert!(html.contains(r#"<link rel="icon" href="/favicon.svg" type="image/svg+xml">"#));
         assert!(html.contains("Curated by"));
@@ -429,13 +472,50 @@ mod tests {
     }
 
     #[test]
+    fn feed_uses_list_semantics_instead_of_article_candidates() {
+        let mut feed = sample_feed();
+        let mut second_publication = feed.publications[0].clone();
+        second_publication.id = Some("https://openalex.org/W2".to_string());
+        second_publication.title = "Second publication".to_string();
+        feed.publications.push(second_publication);
+
+        let document = Html::parse_document(&render_feed(&feed, &[]));
+        let list = Selector::parse("main > ol.publication-list").unwrap();
+        let publication = Selector::parse("ol.publication-list > li.publication").unwrap();
+        let article = Selector::parse("article").unwrap();
+
+        assert_eq!(document.select(&list).count(), 1);
+        assert_eq!(
+            document.select(&publication).count(),
+            feed.publications.len()
+        );
+        assert_eq!(document.select(&article).count(), 0);
+    }
+
+    #[test]
+    fn empty_feed_still_renders_valid_list_content() {
+        let mut feed = sample_feed();
+        feed.publications.clear();
+
+        let document = Html::parse_document(&render_feed(&feed, &[]));
+        let empty_item = Selector::parse("ol.publication-list > li.empty").unwrap();
+
+        assert_eq!(document.select(&empty_item).count(), 1);
+    }
+
+    #[test]
     fn article_preview_links_externally_and_highlights_all_matching_authors() {
         let params = vec![("feed".to_string(), "myfield".to_string())];
         let html = render_article(&sample_feed(), "https://openalex.org/W1", &params).unwrap();
+        let document = Html::parse_document(&html);
+        let article = Selector::parse("main > article.article-detail").unwrap();
+        let publication_list = Selector::parse("ol.publication-list").unwrap();
 
         assert!(html.contains("https://example.com/?a=1&amp;b=2"));
         assert!(html.contains("&lt;strong&gt;abstract&lt;/strong&gt;"));
         assert!(html.contains(r#"<link rel="icon" href="/favicon.svg" type="image/svg+xml">"#));
+        assert_eq!(document.select(&article).count(), 1);
+        assert_eq!(document.select(&publication_list).count(), 0);
         assert!(html.contains(
             r#"<strong class="notable-author">Ada Lovelace</strong>, <strong class="notable-author">Grace Hopper</strong>, Alan Turing"#
         ));
@@ -455,5 +535,27 @@ mod tests {
         assert!(html.contains("Added to collection"));
         assert!(html.contains("<time>May 3, 2025</time>"));
         assert!(html.contains("https://github.com/example/repo/commit/abc"));
+    }
+
+    #[test]
+    fn article_paths_have_unique_reader_cache_keys_and_round_trip_ids() {
+        let first_id = "https://example.com/articles/β-catenin?id=1";
+        let second_id = "https://example.com/articles/β-catenin?id=2";
+        let first_url = article_url(&[], first_id);
+        let second_url = article_url(&[], second_id);
+        let first_path = first_url.split('?').next().unwrap();
+        let second_path = second_url.split('?').next().unwrap();
+
+        assert!(first_path.starts_with("/article/"));
+        assert_ne!(first_path, second_path);
+        assert_eq!(article_id_from_path(first_path).as_deref(), Some(first_id));
+        assert_eq!(
+            article_id_from_path(second_path).as_deref(),
+            Some(second_id)
+        );
+        assert_eq!(article_id_from_path("/"), None);
+        assert_eq!(article_id_from_path("/article/"), None);
+        assert_eq!(article_id_from_path("/article/not-hex"), None);
+        assert_eq!(article_id_from_path("/article/ff"), None);
     }
 }

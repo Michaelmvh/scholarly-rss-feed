@@ -266,10 +266,11 @@ All identifier parameters are repeatable and are merged with a selected named fe
 | `rss` | Return raw RSS XML instead of the browser reader |
 
 The browser reader is server-rendered HTML with no JavaScript or external assets. Selecting a
-publication opens an internal preview page with its abstract and a link to the original
-article. Tracked authors are highlighted in both views using provider IDs when available and
-canonical names or configured aliases for curated records; if several tracked authors
-contributed, each is highlighted.
+publication opens an internal preview page on a unique `/article/<id>` path with its abstract
+and a link to the original article. Unique paths prevent browser reading modes from reusing a
+different page's extracted content. Tracked authors are highlighted in both views using provider
+IDs when available and canonical names or configured aliases for curated records; if several
+tracked authors contributed, each is highlighted.
 Raw RSS has CORS enabled. The generated channel has a 60-minute TTL, and the in-memory cache is
 cleared hourly.
 

@@ -349,6 +349,7 @@ async fn serve_feed(request: Request<Incoming>) -> Result<Response<Full<Bytes>>,
                 .collect()
         })
         .unwrap_or_default();
+    let path_article_id = reader::article_id_from_path(request.uri().path());
 
     let config = Config::load(config_path());
     let provider = match Provider::configured() {
@@ -404,7 +405,7 @@ async fn serve_feed(request: Request<Incoming>) -> Result<Response<Full<Bytes>>,
             "text/xml; charset=utf-8",
             Bytes::from(feed.channel.to_string()),
         )
-    } else if let Some(article_id) = first_param(&params, "article") {
+    } else if let Some(article_id) = path_article_id {
         match reader::render_article(&feed.reader, &article_id, &params) {
             Some(html) => (
                 StatusCode::OK,
