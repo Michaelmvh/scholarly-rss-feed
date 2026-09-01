@@ -80,12 +80,15 @@ impl ViewFilters {
             });
         let source_matches = self.source.as_ref().is_none_or(|selected| {
             if selected == EXCLUDE_CURATED_ONLY {
-                publication.provider_match
+                publication
+                    .discovery_sources
+                    .iter()
+                    .any(|source| !source.is_curated_collection())
             } else {
                 publication
-                    .curated_sources
+                    .discovery_sources
                     .iter()
-                    .any(|source| source.key.as_ref() == Some(selected))
+                    .any(|source| source.is_curated_collection() && &source.key == selected)
             }
         });
 
@@ -112,23 +115,30 @@ impl FilterOptions {
                         .or_insert_with(|| author.name.clone());
                 }
             }
-            for source in &publication.curated_sources {
-                if let Some(key) = source.key.as_ref().filter(|key| !key.is_empty()) {
+            for source in publication
+                .discovery_sources
+                .iter()
+                .filter(|source| source.is_curated_collection())
+            {
+                if !source.key.is_empty() {
                     options
                         .sources
-                        .entry(key.clone())
-                        .or_insert_with(|| source.name.clone());
+                        .entry(source.key.clone())
+                        .or_insert_with(|| source.label.clone());
                 }
             }
         }
-        options.can_exclude_collection_only = feed
-            .publications
-            .iter()
-            .any(|publication| !publication.curated_sources.is_empty())
-            && feed
-                .publications
+        options.can_exclude_collection_only = feed.publications.iter().any(|publication| {
+            publication
+                .discovery_sources
                 .iter()
-                .any(|publication| publication.provider_match);
+                .any(|source| source.is_curated_collection())
+        }) && feed.publications.iter().any(|publication| {
+            publication
+                .discovery_sources
+                .iter()
+                .any(|source| !source.is_curated_collection())
+        });
         options
     }
 }
@@ -180,7 +190,8 @@ fn parse_date(value: &str) -> Option<NaiveDate> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reader::{Attribution, Author, Publication};
+    use crate::provenance::DiscoverySource;
+    use crate::reader::{Author, Publication};
 
     fn publication(date: Option<&str>) -> Publication {
         Publication {
@@ -197,8 +208,7 @@ mod tests {
                 matched_feed: true,
             }],
             abstract_text: None,
-            provider_match: true,
-            curated_sources: Vec::new(),
+            discovery_sources: vec![DiscoverySource::openalex()],
             curated_categories: Vec::new(),
         }
     }
@@ -240,13 +250,17 @@ mod tests {
     #[test]
     fn exclude_collection_only_keeps_provider_collection_overlap() {
         let mut provider_overlap = publication(Some("2026-08-20"));
-        provider_overlap.curated_sources.push(Attribution {
-            key: Some("collection".to_string()),
-            name: "Collection".to_string(),
-            url: "https://example.com/collection".to_string(),
-        });
+        provider_overlap
+            .discovery_sources
+            .push(DiscoverySource::curated_collection(
+                "collection".to_string(),
+                "Collection".to_string(),
+                "https://example.com/collection".to_string(),
+            ));
         let mut collection_only = provider_overlap.clone();
-        collection_only.provider_match = false;
+        collection_only
+            .discovery_sources
+            .retain(DiscoverySource::is_curated_collection);
         let filters = ViewFilters {
             source: Some(EXCLUDE_CURATED_ONLY.to_string()),
             ..ViewFilters::default()

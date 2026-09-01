@@ -1,3 +1,4 @@
+use crate::provenance::DiscoverySource;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -49,19 +50,9 @@ pub struct Work {
     #[serde(default)]
     pub matched_author_names: Vec<String>,
     #[serde(default)]
-    pub provider_match: bool,
-    #[serde(default)]
-    pub curated_sources: Vec<CuratedSource>,
+    pub discovery_sources: Vec<DiscoverySource>,
     #[serde(default)]
     pub curated_categories: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct CuratedSource {
-    #[serde(default)]
-    pub key: Option<String>,
-    pub name: String,
-    pub url: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -95,6 +86,19 @@ pub struct WorksResponse {
 }
 
 impl Work {
+    pub fn add_discovery_source(&mut self, source: DiscoverySource) {
+        if !self.discovery_sources.contains(&source) {
+            self.discovery_sources.push(source);
+            self.discovery_sources.sort();
+        }
+    }
+
+    pub fn curated_discovery_sources(&self) -> impl Iterator<Item = &DiscoverySource> {
+        self.discovery_sources
+            .iter()
+            .filter(|source| source.is_curated_collection())
+    }
+
     /// Best available human-readable title.
     pub fn best_title(&self) -> String {
         self.title
@@ -190,4 +194,50 @@ pub fn normalize_id(raw: &str) -> String {
         .next()
         .unwrap_or(raw)
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provenance::{DiscoverySource, DiscoverySourceKind};
+
+    #[test]
+    fn serializes_structured_provenance() {
+        let work: Work = serde_json::from_value(serde_json::json!({
+            "id": "curated:1",
+            "discovery_sources": [{
+                "kind": "curated_collection",
+                "key": "collection",
+                "label": "Collection",
+                "url": "https://example.com/collection"
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            work.discovery_sources,
+            vec![DiscoverySource::curated_collection(
+                "collection".to_string(),
+                "Collection".to_string(),
+                "https://example.com/collection".to_string()
+            )]
+        );
+        assert!(work
+            .discovery_sources
+            .iter()
+            .any(|source| source.kind == DiscoverySourceKind::CuratedCollection));
+
+        let serialized = serde_json::to_value(work).unwrap();
+        assert!(serialized.get("discovery_sources").is_some());
+    }
+
+    #[test]
+    fn adding_a_discovery_source_is_idempotent() {
+        let mut work: Work = serde_json::from_value(serde_json::json!({"id": "W1"})).unwrap();
+
+        work.add_discovery_source(DiscoverySource::openalex());
+        work.add_discovery_source(DiscoverySource::openalex());
+
+        assert_eq!(work.discovery_sources, vec![DiscoverySource::openalex()]);
+    }
 }

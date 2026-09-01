@@ -1,4 +1,5 @@
-use crate::openalex::{Author, Authorship, CuratedSource, Location, Source, Work};
+use crate::openalex::{Author, Authorship, Location, Source, Work};
+use crate::provenance::DiscoverySource;
 use hyper::header::{ETAG, IF_NONE_MATCH};
 use hyper::StatusCode;
 use lazy_static::lazy_static;
@@ -18,7 +19,7 @@ const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MIN_EXPECTED_PAPERS: usize = 100;
 const REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const KNOWN_IRRELEVANT_IDS: &[&str] = &["arxiv:2602.23956"];
-const SNAPSHOT_FILE: &str = "peldom-snapshot.json";
+const SNAPSHOT_FILE: &str = "peldom-snapshot-v2.json";
 
 lazy_static! {
     static ref PELDOM_SNAPSHOT: Arc<RwLock<Option<Snapshot>>> = Arc::new(RwLock::new(None));
@@ -88,16 +89,7 @@ pub async fn fetch_sources_for_evaluation(
     for source_name in source_names {
         match source_name.as_str() {
             PELDOM_PROTEIN_DESIGN => {
-                let mut snapshot = fetch_peldom(client).await?;
-                for work in &mut snapshot.works {
-                    for source in &mut work.curated_sources {
-                        if source.url == PELDOM_REPOSITORY_URL {
-                            source
-                                .key
-                                .get_or_insert_with(|| PELDOM_PROTEIN_DESIGN.to_string());
-                        }
-                    }
-                }
+                let snapshot = fetch_peldom(client).await?;
                 works.extend(snapshot.works);
                 diagnostics.push(snapshot.diagnostics);
             }
@@ -456,12 +448,11 @@ impl PendingPaper {
             abstract_text_override: None,
             alternate_links: Vec::new(),
             matched_author_names: Vec::new(),
-            provider_match: false,
-            curated_sources: vec![CuratedSource {
-                key: Some(PELDOM_PROTEIN_DESIGN.to_string()),
-                name: PELDOM_SOURCE_NAME.to_string(),
-                url: PELDOM_REPOSITORY_URL.to_string(),
-            }],
+            discovery_sources: vec![DiscoverySource::curated_collection(
+                PELDOM_PROTEIN_DESIGN.to_string(),
+                PELDOM_SOURCE_NAME.to_string(),
+                PELDOM_REPOSITORY_URL.to_string(),
+            )],
             curated_categories: categories,
         })
     }

@@ -235,18 +235,27 @@ fn render_authors(authors: &[Author]) -> String {
 }
 
 fn render_provenance(publication: &Publication) -> String {
-    if publication.curated_sources.is_empty() {
+    let curated_sources = publication
+        .discovery_sources
+        .iter()
+        .filter(|source| source.is_curated_collection())
+        .collect::<Vec<_>>();
+    if curated_sources.is_empty() {
         return String::new();
     }
 
-    let sources = publication
-        .curated_sources
+    let sources = curated_sources
         .iter()
         .map(|source| {
-            format!(
-                r#"<a href="{}" rel="external">{}</a>"#,
-                escape_html(&source.url),
-                escape_html(&source.name)
+            source.url.as_deref().map_or_else(
+                || escape_html(&source.label),
+                |url| {
+                    format!(
+                        r#"<a href="{}" rel="external">{}</a>"#,
+                        escape_html(url),
+                        escape_html(&source.label)
+                    )
+                },
             )
         })
         .collect::<Vec<_>>()
@@ -518,8 +527,9 @@ fn escape_html(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Attribution, CollectionDate};
+    use super::super::CollectionDate;
     use super::*;
+    use crate::provenance::DiscoverySource;
     use scraper::{Html, Selector};
 
     fn sample_feed() -> Feed {
@@ -552,12 +562,14 @@ mod tests {
                     },
                 ],
                 abstract_text: Some("<strong>abstract</strong>".to_string()),
-                provider_match: true,
-                curated_sources: vec![Attribution {
-                    key: Some("curated-source".to_string()),
-                    name: "Curated Source".to_string(),
-                    url: "https://example.com/source?a=1&b=2".to_string(),
-                }],
+                discovery_sources: vec![
+                    DiscoverySource::openalex(),
+                    DiscoverySource::curated_collection(
+                        "curated-source".to_string(),
+                        "Curated Source".to_string(),
+                        "https://example.com/source?a=1&b=2".to_string(),
+                    ),
+                ],
                 curated_categories: vec!["Protein design".to_string()],
             }],
         }
@@ -582,7 +594,9 @@ mod tests {
         let mut second_publication = feed.publications[0].clone();
         second_publication.id = Some("https://openalex.org/W2".to_string());
         second_publication.title = "Second publication".to_string();
-        second_publication.curated_sources.clear();
+        second_publication
+            .discovery_sources
+            .retain(|source| !source.is_curated_collection());
         feed.publications.push(second_publication);
         let params = vec![
             (AUTHOR_PARAM.to_string(), "ada lovelace".to_string()),

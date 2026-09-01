@@ -243,7 +243,6 @@ fn normalize_title(title: &str) -> String {
 }
 
 fn merge_work_version(existing: &mut Work, mut candidate: Work) {
-    let provider_match = existing.provider_match || candidate.provider_match;
     let collection_date = existing
         .collection_date
         .take()
@@ -252,10 +251,10 @@ fn merge_work_version(existing: &mut Work, mut candidate: Work) {
     matched_author_names.append(&mut candidate.matched_author_names);
     matched_author_names.sort();
     matched_author_names.dedup();
-    let mut curated_sources = std::mem::take(&mut existing.curated_sources);
-    curated_sources.append(&mut candidate.curated_sources);
-    curated_sources.sort_by(|left, right| (&left.name, &left.url).cmp(&(&right.name, &right.url)));
-    curated_sources.dedup();
+    let mut discovery_sources = std::mem::take(&mut existing.discovery_sources);
+    discovery_sources.append(&mut candidate.discovery_sources);
+    discovery_sources.sort();
+    discovery_sources.dedup();
     let mut curated_categories = std::mem::take(&mut existing.curated_categories);
     curated_categories.append(&mut candidate.curated_categories);
     curated_categories.sort();
@@ -277,8 +276,7 @@ fn merge_work_version(existing: &mut Work, mut candidate: Work) {
     existing.alternate_links = alternate_links;
     existing.collection_date = collection_date;
     existing.matched_author_names = matched_author_names;
-    existing.provider_match = provider_match;
-    existing.curated_sources = curated_sources;
+    existing.discovery_sources = discovery_sources;
     existing.curated_categories = curated_categories;
 }
 
@@ -329,8 +327,7 @@ mod tests {
             abstract_text_override: None,
             alternate_links: Vec::new(),
             matched_author_names: Vec::new(),
-            provider_match: false,
-            curated_sources: Vec::new(),
+            discovery_sources: Vec::new(),
             curated_categories: Vec::new(),
         }
     }
@@ -425,28 +422,37 @@ mod tests {
     }
 
     #[test]
-    fn merged_work_retains_provider_provenance() {
-        let provider: Work = serde_json::from_value(serde_json::json!({
+    fn merges_structured_provenance() {
+        let mut provider: Work = serde_json::from_value(serde_json::json!({
             "id": "https://openalex.org/W1",
-            "doi": "https://doi.org/10.1000/example",
-            "provider_match": true
+            "doi": "https://doi.org/10.1000/example"
         }))
         .unwrap();
-        let curated: Work = serde_json::from_value(serde_json::json!({
+        provider.add_discovery_source(crate::provenance::DiscoverySource::openalex());
+        let mut curated: Work = serde_json::from_value(serde_json::json!({
             "id": "curated:1",
-            "doi": "https://doi.org/10.1000/example",
-            "curated_sources": [{
-                "key": "collection",
-                "name": "Collection",
-                "url": "https://example.com/collection"
-            }]
+            "doi": "https://doi.org/10.1000/example"
         }))
         .unwrap();
+        curated.add_discovery_source(crate::provenance::DiscoverySource::curated_collection(
+            "collection".to_string(),
+            "Collection".to_string(),
+            "https://example.com/collection".to_string(),
+        ));
 
         let merged = merge_works(vec![provider], vec![curated]);
 
         assert_eq!(merged.len(), 1);
-        assert!(merged[0].provider_match);
-        assert_eq!(merged[0].curated_sources.len(), 1);
+        assert_eq!(
+            merged[0].discovery_sources,
+            vec![
+                crate::provenance::DiscoverySource::openalex(),
+                crate::provenance::DiscoverySource::curated_collection(
+                    "collection".to_string(),
+                    "Collection".to_string(),
+                    "https://example.com/collection".to_string()
+                )
+            ]
+        );
     }
 }

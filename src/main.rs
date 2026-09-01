@@ -5,6 +5,7 @@ mod github_history;
 mod google_scholar;
 mod openalex;
 mod openalex_enrichment;
+mod provenance;
 mod reader;
 mod snapshot_store;
 mod works;
@@ -14,6 +15,7 @@ use crate::openalex::{
     normalize_id, Author, AuthorsResponse, SourceRecord, SourcesResponse, Work, WorksResponse,
     API_BASE,
 };
+use crate::provenance::DiscoverySource;
 use crate::works::{mark_authors_by_name, merge_works, normalize_author_name};
 use chrono::{Duration, NaiveDate, NaiveTime, Utc};
 use http_body_util::Full;
@@ -100,6 +102,13 @@ impl Provider {
         match self {
             Self::OpenAlex => "https://openalex.org/works",
             Self::GoogleScholar => "https://scholar.google.com/scholar",
+        }
+    }
+
+    fn discovery_source(self) -> DiscoverySource {
+        match self {
+            Self::OpenAlex => DiscoverySource::openalex(),
+            Self::GoogleScholar => DiscoverySource::google_scholar(),
         }
     }
 }
@@ -311,7 +320,7 @@ async fn run_curated_comparison(
     );
     let mut provider_works = provider_works?;
     for work in &mut provider_works {
-        work.provider_match = true;
+        work.add_discovery_source(request.provider.discovery_source());
     }
     let curated_evaluation = curated_evaluation?;
     let report = evaluation::compare(
@@ -989,7 +998,7 @@ async fn fetch_works(request: &FeedRequest) -> Result<Vec<Work>, String> {
     );
     let mut provider_works = provider_works?;
     for work in &mut provider_works {
-        work.provider_match = true;
+        work.add_discovery_source(request.provider.discovery_source());
     }
     let mut curated_works = curated_works?;
     if request.provider == Provider::OpenAlex && !curated_works.is_empty() {
@@ -1122,6 +1131,7 @@ async fn fetch_works_for_filter(filter: Option<String>) -> Result<Vec<Work>, Str
 
 fn work_to_item(work: &Work) -> rss::Item {
     let link = work.best_link();
+    let curated_sources = work.curated_discovery_sources().collect::<Vec<_>>();
 
     let guid = link
         .clone()
@@ -1162,11 +1172,13 @@ fn work_to_item(work: &Work) -> rss::Item {
         });
     }
 
-    if !work.curated_sources.is_empty() {
-        let sources = work
-            .curated_sources
+    if !curated_sources.is_empty() {
+        let sources = curated_sources
             .iter()
-            .map(|source| format!("{} ({})", source.name, source.url))
+            .map(|source| match &source.url {
+                Some(url) => format!("{} ({url})", source.label),
+                None => source.label.clone(),
+            })
             .collect::<Vec<_>>()
             .join(", ");
         let provenance = format!("Curated by: {sources}");
@@ -1194,10 +1206,9 @@ fn work_to_item(work: &Work) -> rss::Item {
         creators: author_names,
         ..DublinCoreExtension::default()
     });
-    let category_domain = work
-        .curated_sources
+    let category_domain = curated_sources
         .first()
-        .map(|source| source.url.clone());
+        .and_then(|source| source.url.clone());
     let categories = work
         .curated_categories
         .iter()
@@ -1270,16 +1281,7 @@ fn work_to_publication(work: &Work) -> reader::Publication {
         venue: work.venue(),
         authors,
         abstract_text: work.abstract_text(),
-        provider_match: work.provider_match,
-        curated_sources: work
-            .curated_sources
-            .iter()
-            .map(|source| reader::Attribution {
-                key: source.key.clone(),
-                name: source.name.clone(),
-                url: source.url.clone(),
-            })
-            .collect(),
+        discovery_sources: work.discovery_sources.clone(),
         curated_categories: work.curated_categories.clone(),
     }
 }

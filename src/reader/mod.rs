@@ -1,6 +1,8 @@
 mod filters;
 mod render;
 
+use crate::provenance::DiscoverySource;
+
 pub use render::{
     article_id_from_path, render_article, render_feed, FAVICON, READER_CSS, READER_JS,
 };
@@ -23,8 +25,7 @@ pub struct Publication {
     pub venue: Option<String>,
     pub authors: Vec<Author>,
     pub abstract_text: Option<String>,
-    pub provider_match: bool,
-    pub curated_sources: Vec<Attribution>,
+    pub discovery_sources: Vec<DiscoverySource>,
     pub curated_categories: Vec<String>,
 }
 
@@ -33,13 +34,6 @@ pub struct Author {
     pub name: String,
     pub filter_id: String,
     pub matched_feed: bool,
-}
-
-#[derive(Clone, Debug)]
-pub struct Attribution {
-    pub key: Option<String>,
-    pub name: String,
-    pub url: String,
 }
 
 #[derive(Clone, Debug)]

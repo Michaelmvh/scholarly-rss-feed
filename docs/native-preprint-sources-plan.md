@@ -12,9 +12,10 @@
 
 Replace the provider-versus-curated boolean with structured discovery-source records. Initial
 source kinds cover OpenAlex, Google Scholar, bioRxiv categories, arXiv categories, and curated
-collections. Merged works retain all contributing sources, and older persisted snapshots remain
-readable. Reader source filters use the structured provenance while preserving the existing
-"Exclude collection-only papers" behavior.
+collections. Merged works retain all contributing sources. Snapshot filenames are versioned when
+their schema changes so this single-user service can regenerate cleanly instead of carrying
+compatibility machinery. Reader source filters use the structured provenance while preserving the
+existing "Exclude collection-only papers" behavior.
 
 ## Phase 2: Add reusable discovery snapshots
 

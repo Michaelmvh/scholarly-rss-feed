@@ -237,7 +237,8 @@ fn escape_table_cell(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::openalex::{Author, Authorship, CuratedSource, Location, Source};
+    use crate::openalex::{Author, Authorship, Location, Source};
+    use crate::provenance::DiscoverySource;
 
     fn work(id: &str, doi: Option<&str>, title: &str, author: &str) -> Work {
         Work {
@@ -268,12 +269,11 @@ mod tests {
             abstract_text_override: None,
             alternate_links: Vec::new(),
             matched_author_names: Vec::new(),
-            provider_match: false,
-            curated_sources: vec![CuratedSource {
-                key: Some("example".to_string()),
-                name: "Example".to_string(),
-                url: "https://example.com".to_string(),
-            }],
+            discovery_sources: vec![DiscoverySource::curated_collection(
+                "example".to_string(),
+                "Example".to_string(),
+                "https://example.com".to_string(),
+            )],
             curated_categories: vec!["3.4 Diffusion".to_string()],
         }
     }

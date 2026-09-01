@@ -239,8 +239,7 @@ fn result_to_work(result: ScholarResult, queried_author: &str) -> Work {
             .then_some(result.abstract_text),
         alternate_links: Vec::new(),
         matched_author_names,
-        provider_match: false,
-        curated_sources: Vec::new(),
+        discovery_sources: Vec::new(),
         curated_categories: Vec::new(),
     }
 }
