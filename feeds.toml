@@ -9,8 +9,6 @@ from_days = 365
 [feeds.bioml]
 title = "Machine Learning & Synthetic Biology"
 curated_sources = ["peldom-protein-design"]
-biorxiv_categories = ["synthetic_biology", "bioinformatics"]
-arxiv_categories = ["q-bio.BM", "q-bio.QM"]
 # You can also list ORCIDs and names (names are imprecise for common authors):
 # orcids  = ["0000-0002-1825-0097"]
 # authors = ["Regina Barzilay"]
@@ -99,6 +97,12 @@ openalex_id = "A5058410619"
 [[feeds.bioml.people]]
 name = "Jure Leskovec"
 openalex_id = "A5091272738"
+
+[feeds.native-preprint-pilot]
+title = "Native Preprint Pilot"
+from_days = 7
+biorxiv_categories = ["synthetic_biology", "bioinformatics"]
+arxiv_categories = ["q-bio.BM", "q-bio.QM"]
 
 # A journal-only feed: recent papers from specific journals, no authors required.
 [feeds.top-journals]

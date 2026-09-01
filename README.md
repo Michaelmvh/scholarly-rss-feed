@@ -101,6 +101,7 @@ Per-feed keys:
 | `issns` | ISSNs resolved to OpenAlex source IDs |
 | `journals` | Journal names resolved by top search result |
 | `topics` | OpenAlex topic IDs used to narrow results |
+| `from_days` | Feed-specific rolling recency window in days |
 | `from` | Explicit earliest publication date in `YYYY-MM-DD` format |
 
 Each `people` entry accepts:

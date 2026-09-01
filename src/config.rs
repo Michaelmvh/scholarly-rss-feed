@@ -56,6 +56,8 @@ pub struct FeedConfig {
     pub journals: Vec<String>,
     #[serde(default)]
     pub topics: Vec<String>,
+    /// Feed-specific rolling recency window in days.
+    pub from_days: Option<u32>,
     /// Explicit earliest publication date (YYYY-MM-DD); overrides `from_days`.
     pub from: Option<String>,
 }

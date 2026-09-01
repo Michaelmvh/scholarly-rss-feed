@@ -579,7 +579,7 @@ async fn resolve_feed_request(
     let feed = feed.unwrap_or(&empty);
     let from = adhoc_from
         .or_else(|| feed.from.clone())
-        .unwrap_or_else(|| default_from_date(config.settings.from_days));
+        .unwrap_or_else(|| default_from_date(feed.from_days.or(config.settings.from_days)));
     let mut curated_sources = feed.curated_sources.clone();
     curated_sources.sort();
     curated_sources.dedup();
@@ -1883,14 +1883,46 @@ curated_sources = ["peldom-protein-design"]
         assert_eq!(request.from, "1900-01-01");
     }
 
+    #[tokio::test]
+    async fn feed_specific_recency_overrides_global_default() {
+        let config: Config = toml::from_str(
+            r#"
+[settings]
+from_days = 365
+
+[feeds.pilot]
+from_days = 7
+arxiv_categories = ["q-bio.BM"]
+"#,
+        )
+        .unwrap();
+        let params = vec![("feed".to_string(), "pilot".to_string())];
+
+        let request = resolve_feed_request(&params, &config, Provider::OpenAlex)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(request.from, default_from_date(Some(7)));
+    }
+
     #[test]
     fn production_bioml_feed_enables_recent_curated_discovery() {
         let config: Config = toml::from_str(include_str!("../feeds.toml")).unwrap();
         let bioml = config.feeds.get("bioml").unwrap();
+        let pilot = config.feeds.get("native-preprint-pilot").unwrap();
         let archive = config.feeds.get("protein-design-archive").unwrap();
 
         assert_eq!(bioml.curated_sources, vec!["peldom-protein-design"]);
+        assert!(bioml.biorxiv_categories.is_empty());
+        assert!(bioml.arxiv_categories.is_empty());
         assert!(bioml.from.is_none());
+        assert_eq!(pilot.from_days, Some(7));
+        assert_eq!(
+            pilot.biorxiv_categories,
+            vec!["synthetic_biology", "bioinformatics"]
+        );
+        assert_eq!(pilot.arxiv_categories, vec!["q-bio.BM", "q-bio.QM"]);
         assert_eq!(archive.curated_sources, vec!["peldom-protein-design"]);
         assert_eq!(archive.from.as_deref(), Some("1900-01-01"));
     }
