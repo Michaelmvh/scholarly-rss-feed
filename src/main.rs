@@ -139,6 +139,7 @@ type FeedCacheKey = (
     Vec<String>,
     Vec<String>,
     Vec<String>,
+    Vec<String>,
     String,
     Vec<String>,
 );
@@ -159,6 +160,8 @@ struct FeedRequest {
     curated_sources: Vec<String>,
     /// Native bioRxiv categories included in the feed.
     biorxiv_categories: Vec<String>,
+    /// Native arXiv categories included in the feed.
+    arxiv_categories: Vec<String>,
     /// Normalized, deduped, sorted OpenAlex source (journal) ids.
     source_ids: Vec<String>,
     /// Earliest publication date (YYYY-MM-DD).
@@ -178,6 +181,7 @@ impl FeedRequest {
             self.tracked_author_names.clone(),
             self.curated_sources.clone(),
             self.biorxiv_categories.clone(),
+            self.arxiv_categories.clone(),
             self.source_ids.clone(),
             self.from.clone(),
             self.topics.clone(),
@@ -585,6 +589,11 @@ async fn resolve_feed_request(
     biorxiv_categories.dedup();
     discovery::biorxiv::validate_categories(&biorxiv_categories)
         .map_err(ResolveFeedError::InvalidRequest)?;
+    let mut arxiv_categories = feed.arxiv_categories.clone();
+    arxiv_categories.sort();
+    arxiv_categories.dedup();
+    discovery::arxiv::validate_categories(&arxiv_categories)
+        .map_err(ResolveFeedError::InvalidRequest)?;
     let mut tracked_author_names = feed
         .people
         .iter()
@@ -627,6 +636,7 @@ async fn resolve_feed_request(
         if google_scholar_authors.is_empty()
             && curated_sources.is_empty()
             && biorxiv_categories.is_empty()
+            && arxiv_categories.is_empty()
         {
             return Err(ResolveFeedError::InvalidRequest(
                 "The Google Scholar provider requires at least one \
@@ -643,6 +653,7 @@ async fn resolve_feed_request(
             tracked_author_names,
             curated_sources,
             biorxiv_categories,
+            arxiv_categories,
             source_ids: Vec::new(),
             from,
             topics: Vec::new(),
@@ -727,6 +738,7 @@ async fn resolve_feed_request(
         && source_ids.is_empty()
         && curated_sources.is_empty()
         && biorxiv_categories.is_empty()
+        && arxiv_categories.is_empty()
     {
         return Ok(None);
     }
@@ -748,6 +760,7 @@ async fn resolve_feed_request(
         tracked_author_names,
         curated_sources,
         biorxiv_categories,
+        arxiv_categories,
         source_ids,
         from,
         topics,
@@ -993,6 +1006,7 @@ fn channel_metadata(request: &FeedRequest) -> (String, String) {
     let journals = request.source_ids.len();
     let curated_sources = request.curated_sources.len();
     let biorxiv_categories = request.biorxiv_categories.len();
+    let arxiv_categories = request.arxiv_categories.len();
     let mut subjects = Vec::new();
     if authors > 0 {
         subjects.push(format!("{authors} author(s)"));
@@ -1006,6 +1020,9 @@ fn channel_metadata(request: &FeedRequest) -> (String, String) {
     if biorxiv_categories > 0 {
         subjects.push(format!("{biorxiv_categories} bioRxiv category/categories"));
     }
+    if arxiv_categories > 0 {
+        subjects.push(format!("{arxiv_categories} arXiv category/categories"));
+    }
     let subject = subjects.join(" and ");
 
     let title = format!("Recent publications ({subject})");
@@ -1015,10 +1032,11 @@ fn channel_metadata(request: &FeedRequest) -> (String, String) {
 }
 
 async fn fetch_works(request: &FeedRequest) -> Result<Vec<Work>, String> {
-    let (provider_works, curated_works, biorxiv_works) = tokio::join!(
+    let (provider_works, curated_works, biorxiv_works, arxiv_works) = tokio::join!(
         fetch_provider_works(request),
         curated::fetch_sources(&CLIENT, &request.curated_sources, &request.from),
         discovery::biorxiv::fetch_categories(&CLIENT, &request.biorxiv_categories, &request.from,),
+        discovery::arxiv::fetch_categories(&CLIENT, &request.arxiv_categories, &request.from),
     );
     let mut provider_works = provider_works?;
     for work in &mut provider_works {
@@ -1026,6 +1044,7 @@ async fn fetch_works(request: &FeedRequest) -> Result<Vec<Work>, String> {
     }
     let mut curated_works = curated_works?;
     let biorxiv_works = biorxiv_works?;
+    let arxiv_works = arxiv_works?;
     if request.provider == Provider::OpenAlex && !curated_works.is_empty() {
         curated_works =
             match openalex_enrichment::enrich(&CLIENT, curated_works.clone(), mailto().as_deref())
@@ -1038,7 +1057,7 @@ async fn fetch_works(request: &FeedRequest) -> Result<Vec<Work>, String> {
                 }
             };
     }
-    let native_works = merge_works(biorxiv_works, curated_works);
+    let native_works = merge_works(arxiv_works, merge_works(biorxiv_works, curated_works));
     let mut works = merge_works(provider_works, native_works);
     mark_authors_by_name(&mut works, &request.tracked_author_names);
     Ok(works)

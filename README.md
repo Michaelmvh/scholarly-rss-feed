@@ -94,6 +94,7 @@ Per-feed keys:
 | `people` | Canonical author records shared by all providers |
 | `curated_sources` | Curated paper collections merged into the feed |
 | `biorxiv_categories` | Native bioRxiv categories merged into the feed |
+| `arxiv_categories` | Native arXiv categories merged into the feed |
 | `orcids` | ORCIDs resolved to OpenAlex author IDs |
 | `authors` | Author names resolved by top search result; imprecise for common names |
 | `source_ids` | OpenAlex journal/source IDs; preferred |

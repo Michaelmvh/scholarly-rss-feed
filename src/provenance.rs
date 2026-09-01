@@ -58,6 +58,15 @@ impl DiscoverySource {
         }
     }
 
+    pub fn arxiv_category(key: &str, label: &str) -> Self {
+        Self {
+            kind: DiscoverySourceKind::Arxiv,
+            key: format!("arxiv:{key}"),
+            label: format!("arXiv: {label}"),
+            url: Some(format!("https://arxiv.org/list/{key}/recent")),
+        }
+    }
+
     pub fn is_curated_collection(&self) -> bool {
         self.kind == DiscoverySourceKind::CuratedCollection
     }

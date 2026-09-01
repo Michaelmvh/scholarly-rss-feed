@@ -33,6 +33,9 @@ pub struct FeedConfig {
     /// bioRxiv subject categories discovered through the native API.
     #[serde(default)]
     pub biorxiv_categories: Vec<String>,
+    /// arXiv subject categories discovered through native feeds and API backfill.
+    #[serde(default)]
+    pub arxiv_categories: Vec<String>,
     /// Legacy OpenAlex author IDs.
     #[serde(default)]
     pub author_ids: Vec<String>,
