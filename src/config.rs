@@ -75,16 +75,48 @@ pub struct PersonConfig {
 impl Config {
     /// Load config from `path`. A missing file yields an empty config so the
     /// server still works in pure ad-hoc-param mode.
-    pub fn load(path: &Path) -> Config {
+    pub fn load(path: &Path) -> Result<Config, String> {
         match std::fs::read_to_string(path) {
-            Ok(contents) => match toml::from_str::<Config>(&contents) {
-                Ok(config) => config,
-                Err(err) => {
-                    eprintln!("Failed to parse config {}: {err}", path.display());
-                    Config::default()
-                }
-            },
-            Err(_) => Config::default(),
+            Ok(contents) => toml::from_str::<Config>(&contents)
+                .map_err(|error| format!("Failed to parse config {}: {error}", path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+            Err(error) => Err(format!("Failed to read config {}: {error}", path.display())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temporary_path(label: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "scholarly-rss-feed-{label}-{}-{nonce}.toml",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn missing_config_supports_ad_hoc_mode() {
+        let config = Config::load(&temporary_path("missing")).unwrap();
+
+        assert!(config.default_feed.is_none());
+        assert!(config.feeds.is_empty());
+    }
+
+    #[test]
+    fn malformed_config_is_an_error() {
+        let path = temporary_path("malformed");
+        std::fs::write(&path, "[feeds.invalid\n").unwrap();
+
+        let error = Config::load(&path).unwrap_err();
+        std::fs::remove_file(path).unwrap();
+
+        assert!(error.contains("Failed to parse config"));
     }
 }

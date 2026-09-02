@@ -1,6 +1,7 @@
 use crate::discovery::snapshot::DiscoverySnapshot;
 use crate::openalex::{Author, Authorship, Location, Source, Work};
 use crate::provenance::DiscoverySource;
+use chrono::NaiveDate;
 use hyper::header::{ETAG, IF_NONE_MATCH};
 use hyper::StatusCode;
 use lazy_static::lazy_static;
@@ -105,31 +106,34 @@ pub async fn fetch_sources_for_evaluation(
         }
     }
 
-    filter_from(&mut works, from);
+    filter_from(&mut works, from)?;
 
     Ok(SourceEvaluation { works, diagnostics })
 }
 
-fn filter_from(works: &mut Vec<Work>, from: &str) {
-    let Some(from_year) = from.get(..4).and_then(|year| year.parse::<u16>().ok()) else {
-        return;
-    };
+fn filter_from(works: &mut Vec<Work>, from: &str) -> Result<(), String> {
+    let from_date = NaiveDate::parse_from_str(from, "%Y-%m-%d")
+        .map_err(|error| format!("Invalid curated-source cutoff \"{from}\": {error}"))?;
+    let include_undated = from_date == NaiveDate::from_ymd_opt(1900, 1, 1).unwrap();
     works.retain(|work| {
-        match work
-            .publication_date
+        work.publication_date
             .as_deref()
+            .and_then(parse_date)
             .or_else(|| {
                 work.collection_date
                     .as_ref()
-                    .map(|collection_date| collection_date.date.as_str())
+                    .and_then(|collection_date| parse_date(&collection_date.date))
             })
-            .and_then(|date| date.get(..4))
-            .and_then(|year| year.parse::<u16>().ok())
-        {
-            Some(year) => year >= from_year,
-            None => from_year <= 1900,
-        }
+            .is_some_and(|date| date >= from_date)
+            || (include_undated
+                && work.publication_date.is_none()
+                && work.collection_date.is_none())
     });
+    Ok(())
+}
+
+fn parse_date(value: &str) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()
 }
 
 async fn fetch_peldom(client: &reqwest::Client) -> Result<Snapshot, String> {
@@ -876,7 +880,7 @@ Example Author
     fn full_archive_keeps_undated_stable_id_papers() {
         let mut works = parse_peldom_with_diagnostics(FIXTURE).unwrap().0;
 
-        filter_from(&mut works, "1900-01-01");
+        filter_from(&mut works, "1900-01-01").unwrap();
         assert!(works.iter().any(|work| work.publication_date.is_none()));
 
         let undated = works
@@ -887,7 +891,7 @@ Example Author
             date: "2025-05-03".to_string(),
             commit_url: "https://example.com/commit".to_string(),
         });
-        filter_from(&mut works, "2025-01-01");
+        filter_from(&mut works, "2025-01-01").unwrap();
         assert!(works.iter().any(|work| {
             work.publication_date.is_none()
                 && work
@@ -895,6 +899,34 @@ Example Author
                     .as_ref()
                     .is_some_and(|date| date.date == "2025-05-03")
         }));
+    }
+
+    #[test]
+    fn cutoff_compares_complete_publication_dates() {
+        let mut works = vec![
+            serde_json::from_value(serde_json::json!({
+                "id": "before",
+                "publication_date": "2026-01-01"
+            }))
+            .unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "id": "after",
+                "publication_date": "2026-09-02"
+            }))
+            .unwrap(),
+        ];
+
+        filter_from(&mut works, "2026-09-01").unwrap();
+
+        assert_eq!(works.len(), 1);
+        assert_eq!(works[0].id.as_deref(), Some("after"));
+    }
+
+    #[test]
+    fn malformed_cutoff_is_rejected() {
+        let mut works = Vec::new();
+
+        assert!(filter_from(&mut works, "2026").is_err());
     }
 
     #[test]

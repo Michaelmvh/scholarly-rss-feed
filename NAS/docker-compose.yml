@@ -8,6 +8,7 @@ services:
       - GSRF_MAILTO=${GSRF_MAILTO}
       - GSRF_PROVIDER=${GSRF_PROVIDER:-openalex}
       - GSRF_CACHE_DIR=/cache
+      - GSRF_TRUST_PROXY_CLIENT_IP=true
     volumes:
       - scholar-rss-cache:/cache
     expose:

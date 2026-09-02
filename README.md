@@ -128,10 +128,12 @@ an abstract, then published status, then the newest date. Links to the other ver
 included in the retained item's description. Records whose titles or author lists cannot be
 compared are kept separate rather than risking a false match.
 
-The config is read on every request. Identical resolved queries are cached for up to one hour.
-Restarting clears generated feeds and in-memory provider data, while the curated source snapshot
-survives through `GSRF_CACHE_DIR`. In Docker, changing the repository copy of `feeds.toml`
-requires publishing and deploying a new image because the file is baked into that image.
+The config is read on every request. A missing file enables ad-hoc-param mode, while an unreadable
+or malformed file returns an HTTP 500 response instead of silently disabling configured feeds.
+Identical resolved queries are cached for up to one hour. Restarting clears generated feeds and
+in-memory provider data, while the curated source snapshot survives through `GSRF_CACHE_DIR`. In
+Docker, changing the repository copy of `feeds.toml` requires publishing and deploying a new image
+because the file is baked into that image.
 
 ### Switching providers
 
@@ -545,23 +547,30 @@ Every successful workflow build publishes an immutable `sha-...` image tag. To r
 
 ## Caching and request load
 
-Normal TRMNL polling will not overwhelm the NAS. The generated RSS channel for each resolved
-query is cached in memory for up to one hour. A cache hit only clones and serializes the
-already-built channel; it does not call a provider again. A cold OpenAlex request makes at most
-one author query and one journal query, concurrently. A cold Google Scholar request makes one
-query per configured person, sequentially. Concurrent requests for the same uncached feed
-share one in-flight build instead of duplicating provider traffic, and provider requests use
-finite connection and total timeouts.
+Normal TRMNL polling will not overwhelm the NAS. Up to 128 generated feeds are cached in memory
+for one hour with least-recently-used eviction. A cache hit only clones and serializes the
+already-built channel; it does not call a provider again. A cold OpenAlex request makes one
+cursor-paginated author query and one cursor-paginated journal query, concurrently. Each query
+fails explicitly rather than returning a partial feed if it exceeds 20,000 works; set
+`GSRF_MAX_OPENALEX_WORKS` to a different positive ceiling. A cold Google Scholar request makes one
+query per configured person, sequentially. Concurrent requests for the same uncached feed share
+one in-flight build instead of duplicating provider traffic, and provider requests use finite
+connection and total timeouts. The server accepts up to 64 concurrent connections and runs up to
+eight cold feed builds at once.
 
 Use stable OpenAlex IDs in `feeds.toml` and give TRMNL a named feed URL such as
 `https://reading.michaelmvh.com/?feed=myfield&rss`. Name, ORCID, ISSN, and journal-name parameters
 must be resolved before the channel-cache lookup and can therefore cause extra OpenAlex calls.
 
-Current limitations:
-
-- Cloudflare Tunnel transports requests but does not automatically cache this dynamic RSS URL.
-- The application has no rate limiter.
-- Different ad-hoc parameters create different cache entries until the hourly cache clear.
+Dynamic requests are limited to an 8 KiB query string, 100 parameters, 25 provider/source filter
+values, and 256 bytes per value. Dynamic feed and reader routes also allow 60 requests per client
+IP per minute. `GSRF_TRUST_PROXY_CLIENT_IP=true` enables the Cloudflare connecting-IP header for
+this limit and is set only in the tunnel deployment; do not enable it when clients can connect
+directly. Inbound headers have a 10-second deadline, HTTP keep-alive is disabled, and excess cold
+feed builds receive `503 Service Unavailable` instead of queueing. Each connection has a
+five-minute overall deadline so stalled response readers cannot hold capacity indefinitely.
+Cloudflare does not automatically cache the dynamic RSS URL; retain edge rate limiting as an
+additional layer for the public endpoint.
 
 These limitations are not significant for ordinary TRMNL use, but Cloudflare can cheaply
 protect the public endpoint:

@@ -91,6 +91,13 @@ pub struct Source {
 #[derive(Debug, Deserialize)]
 pub struct WorksResponse {
     pub results: Vec<Work>,
+    #[serde(default)]
+    pub meta: Option<WorksMeta>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WorksMeta {
+    pub next_cursor: Option<String>,
 }
 
 impl Work {

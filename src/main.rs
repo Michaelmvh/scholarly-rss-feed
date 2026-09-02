@@ -25,26 +25,33 @@ use hyper::http::Error;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use lazy_static::lazy_static;
 use parking_lot::RwLock;
 use rss::extension::dublincore::DublinCoreExtension;
 use rss::{Category, Channel, ChannelBuilder, GuidBuilder, ItemBuilder, Source, TextInput};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration as StdDuration;
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
 lazy_static! {
-    static ref RSS_CHANNELS: Arc<RwLock<HashMap<FeedRequest, GeneratedFeed>>> =
+    static ref RSS_CHANNELS: Arc<RwLock<HashMap<FeedCacheKey, CachedFeed>>> =
         Arc::new(RwLock::new(HashMap::new()));
     static ref FEED_BUILDS: FeedBuilds = Arc::new(RwLock::new(HashMap::new()));
+    static ref CONNECTION_LIMIT: Arc<Semaphore> =
+        Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    static ref FEED_BUILD_LIMIT: Arc<Semaphore> =
+        Arc::new(Semaphore::new(MAX_CONCURRENT_FEED_BUILDS));
+    static ref CLIENT_REQUESTS: Arc<RwLock<HashMap<IpAddr, VecDeque<Instant>>>> =
+        Arc::new(RwLock::new(HashMap::new()));
     pub static ref CLIENT: reqwest::Client = reqwest::Client::builder()
         .user_agent("scholarly-rss-feed")
         .connect_timeout(StdDuration::from_secs(10))
@@ -57,6 +64,19 @@ static CONFIG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 const DEFAULT_FROM_DAYS: u32 = 365;
 const DEFAULT_NATIVE_FROM_DAYS: u32 = 7;
+const DEFAULT_MAX_OPENALEX_WORKS: usize = 20_000;
+const OPENALEX_PAGE_SIZE: usize = 200;
+const MAX_CONCURRENT_CONNECTIONS: usize = 64;
+const MAX_CONCURRENT_FEED_BUILDS: usize = 8;
+const MAX_GENERATED_FEEDS: usize = 128;
+const MAX_QUERY_LENGTH: usize = 8 * 1024;
+const MAX_QUERY_PARAMS: usize = 100;
+const MAX_DYNAMIC_FILTER_VALUES: usize = 25;
+const MAX_QUERY_VALUE_LENGTH: usize = 256;
+const MAX_REQUESTS_PER_MINUTE: usize = 60;
+const MAX_RATE_LIMIT_CLIENTS: usize = 1024;
+const HEADER_READ_TIMEOUT: StdDuration = StdDuration::from_secs(10);
+const CONNECTION_TIMEOUT: StdDuration = StdDuration::from_secs(5 * 60);
 const DYNAMIC_BROWSER_CACHE_CONTROL: &str = "public, max-age=0, must-revalidate";
 const DYNAMIC_CDN_CACHE_CONTROL: &str = "public, max-age=7200, stale-while-revalidate=86400";
 pub(crate) const BIORXIV_CATEGORY_PARAM: &str = "biorxiv_category";
@@ -81,6 +101,12 @@ enum Provider {
 enum ResolveFeedError {
     InvalidRequest(String),
     Provider(String),
+}
+
+#[derive(Clone, Debug)]
+enum GenerateFeedError {
+    Busy,
+    Build(String),
 }
 
 impl Provider {
@@ -133,6 +159,12 @@ struct GeneratedFeed {
     reader: reader::Feed,
 }
 
+#[derive(Clone)]
+struct CachedFeed {
+    feed: GeneratedFeed,
+    last_accessed: Instant,
+}
+
 struct CliArgs {
     address: String,
     config_path: PathBuf,
@@ -147,6 +179,7 @@ struct ComparisonArgs {
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
 struct FeedCacheKey {
     provider: Provider,
+    title: Option<String>,
     author_ids: Vec<String>,
     google_scholar_authors: Vec<String>,
     tracked_author_names: Vec<String>,
@@ -161,7 +194,7 @@ struct FeedCacheKey {
     core_available: bool,
     available_curated_sources: Vec<String>,
 }
-type FeedBuild = Arc<tokio::sync::OnceCell<Result<GeneratedFeed, String>>>;
+type FeedBuild = Arc<tokio::sync::OnceCell<Result<GeneratedFeed, GenerateFeedError>>>;
 type FeedBuilds = Arc<RwLock<HashMap<FeedCacheKey, FeedBuild>>>;
 
 /// Fully-resolved description of a feed, used as the cache key.
@@ -202,6 +235,7 @@ impl FeedRequest {
     fn cache_key(&self) -> FeedCacheKey {
         FeedCacheKey {
             provider: self.provider,
+            title: self.title.clone(),
             author_ids: self.author_ids.clone(),
             google_scholar_authors: self.google_scholar_authors.clone(),
             tracked_author_names: self.tracked_author_names.clone(),
@@ -257,18 +291,32 @@ async fn main() {
             last_update = Instant::now();
         }
 
-        if let Ok((stream, _)) = listener.accept().await {
+        let permit = CONNECTION_LIMIT
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("connection semaphore closed");
+        if let Ok((stream, peer_addr)) = listener.accept().await {
             let io = TokioIo::new(stream);
 
             tokio::task::spawn(async move {
-                match http1::Builder::new()
-                    .serve_connection(io, service_fn(serve_feed))
-                    .await
-                {
-                    Ok(_) => (),
-                    Err(err) => eprintln!("Error serving connection: {:?}", err),
+                let _permit = permit;
+                let connection = http1::Builder::new()
+                    .timer(TokioTimer::new())
+                    .header_read_timeout(HEADER_READ_TIMEOUT)
+                    .keep_alive(false)
+                    .serve_connection(
+                        io,
+                        service_fn(move |request| serve_feed(request, peer_addr.ip())),
+                    );
+                match tokio::time::timeout(CONNECTION_TIMEOUT, connection).await {
+                    Ok(Ok(_)) => (),
+                    Ok(Err(error)) => eprintln!("Error serving connection: {error:?}"),
+                    Err(_) => eprintln!("Connection exceeded the five-minute deadline"),
                 }
             });
+        } else {
+            drop(permit);
         }
     }
 }
@@ -331,7 +379,7 @@ async fn run_curated_comparison(
     comparison: &ComparisonArgs,
     config_path: &std::path::Path,
 ) -> Result<(), String> {
-    let config = Config::load(config_path);
+    let config = Config::load(config_path)?;
     let provider = Provider::configured()?;
     let params = vec![("feed".to_string(), comparison.feed_name.clone())];
     let request = resolve_feed_request(&params, &config, provider)
@@ -379,7 +427,10 @@ async fn run_curated_comparison(
     Ok(())
 }
 
-async fn serve_feed(request: Request<Incoming>) -> Result<Response<Full<Bytes>>, Error> {
+async fn serve_feed(
+    request: Request<Incoming>,
+    peer_ip: IpAddr,
+) -> Result<Response<Full<Bytes>>, Error> {
     if request.uri().path() == "/favicon.svg" {
         return Response::builder()
             .header("Content-Type", "image/svg+xml")
@@ -421,10 +472,26 @@ async fn serve_feed(request: Request<Incoming>) -> Result<Response<Full<Bytes>>,
             .body(Full::new(Bytes::from_static(APPLE_TOUCH_ICON)));
     }
 
+    let forwarded_ip = request
+        .headers()
+        .get("cf-connecting-ip")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok());
+    let client_ip = select_client_ip(peer_ip, forwarded_ip, trust_proxy_client_ip());
+    if !allow_request(&mut CLIENT_REQUESTS.write(), client_ip, Instant::now()) {
+        return Response::builder()
+            .header("Content-Type", "text/plain; charset=utf-8")
+            .header("Retry-After", "60")
+            .status(StatusCode::TOO_MANY_REQUESTS)
+            .body(Full::new(Bytes::from(
+                "Too many requests; retry in one minute.",
+            )));
+    }
+
     // Preserve repeated query params (e.g. multiple ?author_id=).
-    let params: Vec<(String, String)> = request
-        .uri()
-        .query()
+    let query = request.uri().query().unwrap_or_default();
+    let params: Vec<(String, String)> = (!query.is_empty())
+        .then_some(query)
         .map(|v| {
             url::form_urlencoded::parse(v.as_bytes())
                 .into_owned()
@@ -433,7 +500,22 @@ async fn serve_feed(request: Request<Incoming>) -> Result<Response<Full<Bytes>>,
         .unwrap_or_default();
     let path_article_id = reader::article_id_from_path(request.uri().path());
 
-    let config = Config::load(config_path());
+    if let Err(message) = validate_dynamic_request(query, &params) {
+        return Response::builder()
+            .header("Content-Type", "text/plain; charset=utf-8")
+            .status(StatusCode::BAD_REQUEST)
+            .body(Full::new(Bytes::from(message)));
+    }
+    let config = match Config::load(config_path()) {
+        Ok(config) => config,
+        Err(message) => {
+            eprintln!("{message}");
+            return Response::builder()
+                .header("Content-Type", "text/plain; charset=utf-8")
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Full::new(Bytes::from(message)));
+        }
+    };
     let provider = match Provider::configured() {
         Ok(provider) => provider,
         Err(message) => {
@@ -473,7 +555,16 @@ async fn serve_feed(request: Request<Incoming>) -> Result<Response<Full<Bytes>>,
 
     let feed = match generate_feed_if_needed(feed_request).await {
         Ok(feed) => feed,
-        Err(message) => {
+        Err(GenerateFeedError::Busy) => {
+            return Response::builder()
+                .header("Content-Type", "text/plain; charset=utf-8")
+                .header("Retry-After", "5")
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(Full::new(Bytes::from(
+                    "The feed builder is busy; retry shortly.",
+                )));
+        }
+        Err(GenerateFeedError::Build(message)) => {
             eprintln!("{message}");
             return Response::builder()
                 .header("Content-Type", "text/plain; charset=utf-8")
@@ -541,6 +632,87 @@ fn first_param(params: &[(String, String)], key: &str) -> Option<String> {
 
 fn has_param(params: &[(String, String)], key: &str) -> bool {
     params.iter().any(|(name, _)| name == key)
+}
+
+fn validate_dynamic_request(query: &str, params: &[(String, String)]) -> Result<(), String> {
+    if query.len() > MAX_QUERY_LENGTH {
+        return Err(format!(
+            "Query string exceeds the {MAX_QUERY_LENGTH}-byte limit."
+        ));
+    }
+    if params.len() > MAX_QUERY_PARAMS {
+        return Err(format!(
+            "Query contains more than {MAX_QUERY_PARAMS} parameters."
+        ));
+    }
+    if params
+        .iter()
+        .any(|(_, value)| value.len() > MAX_QUERY_VALUE_LENGTH)
+    {
+        return Err(format!(
+            "Query parameter values may not exceed {MAX_QUERY_VALUE_LENGTH} bytes."
+        ));
+    }
+    let dynamic_filter_count = params
+        .iter()
+        .filter(|(name, _)| {
+            matches!(
+                name.as_str(),
+                "author_id"
+                    | "orcid"
+                    | "author"
+                    | "source_id"
+                    | "issn"
+                    | "journal"
+                    | "topic"
+                    | "concept"
+                    | BIORXIV_CATEGORY_PARAM
+                    | ARXIV_CATEGORY_PARAM
+                    | PAPER_SOURCE_PARAM
+            )
+        })
+        .count();
+    if dynamic_filter_count > MAX_DYNAMIC_FILTER_VALUES {
+        return Err(format!(
+            "Query contains more than {MAX_DYNAMIC_FILTER_VALUES} dynamic filter values."
+        ));
+    }
+    Ok(())
+}
+
+fn allow_request(
+    clients: &mut HashMap<IpAddr, VecDeque<Instant>>,
+    client_ip: IpAddr,
+    now: Instant,
+) -> bool {
+    let window = StdDuration::from_secs(60);
+    clients.retain(|_, requests| {
+        requests.retain(|requested_at| now.duration_since(*requested_at) < window);
+        !requests.is_empty()
+    });
+    if !clients.contains_key(&client_ip) && clients.len() >= MAX_RATE_LIMIT_CLIENTS {
+        return false;
+    }
+    let requests = clients.entry(client_ip).or_default();
+    if requests.len() >= MAX_REQUESTS_PER_MINUTE {
+        return false;
+    }
+    requests.push_back(now);
+    true
+}
+
+fn trust_proxy_client_ip() -> bool {
+    env::var("GSRF_TRUST_PROXY_CLIENT_IP")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+}
+
+fn select_client_ip(peer_ip: IpAddr, forwarded_ip: Option<IpAddr>, trust_proxy: bool) -> IpAddr {
+    if trust_proxy {
+        forwarded_ip.unwrap_or(peer_ip)
+    } else {
+        peer_ip
+    }
 }
 
 /// Merge a named feed (if any) with provider-compatible ad-hoc URL params and
@@ -1066,7 +1238,7 @@ async fn resolve_journal_name(name: &str) -> Result<Option<(String, String)>, St
     Ok(Some((id, display)))
 }
 
-async fn generate_feed_if_needed(request: FeedRequest) -> Result<GeneratedFeed, String> {
+async fn generate_feed_if_needed(request: FeedRequest) -> Result<GeneratedFeed, GenerateFeedError> {
     let key = request.cache_key();
     if let Some(feed) = find_cached(&key) {
         return Ok(feed);
@@ -1078,11 +1250,16 @@ async fn generate_feed_if_needed(request: FeedRequest) -> Result<GeneratedFeed, 
         .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
         .clone();
     let result = build
-        .get_or_init(|| async { build_feed(&request).await })
+        .get_or_init(|| async {
+            let _permit = FEED_BUILD_LIMIT
+                .try_acquire()
+                .map_err(|_| GenerateFeedError::Busy)?;
+            build_feed(&request).await.map_err(GenerateFeedError::Build)
+        })
         .await
         .clone();
     if let Ok(feed) = &result {
-        RSS_CHANNELS.write().insert(request, feed.clone());
+        insert_cached(key.clone(), feed.clone());
     }
     let mut builds = FEED_BUILDS.write();
     if builds
@@ -1096,11 +1273,49 @@ async fn generate_feed_if_needed(request: FeedRequest) -> Result<GeneratedFeed, 
 }
 
 fn find_cached(key: &FeedCacheKey) -> Option<GeneratedFeed> {
-    let channels = RSS_CHANNELS.read();
+    let mut channels = RSS_CHANNELS.write();
+    let entry = channels.get_mut(key)?;
+    entry.last_accessed = Instant::now();
+    Some(entry.feed.clone())
+}
+
+fn insert_cached(key: FeedCacheKey, feed: GeneratedFeed) {
+    let mut channels = RSS_CHANNELS.write();
+    insert_cache_entry(
+        &mut channels,
+        key,
+        feed,
+        Instant::now(),
+        MAX_GENERATED_FEEDS,
+    );
+}
+
+fn insert_cache_entry(
+    channels: &mut HashMap<FeedCacheKey, CachedFeed>,
+    key: FeedCacheKey,
+    feed: GeneratedFeed,
+    now: Instant,
+    capacity: usize,
+) {
+    if !channels.contains_key(&key) && channels.len() >= capacity {
+        if let Some(oldest) = oldest_cache_key(channels) {
+            channels.remove(&oldest);
+        }
+    }
+    channels.insert(
+        key,
+        CachedFeed {
+            feed,
+            last_accessed: now,
+        },
+    );
+}
+
+fn oldest_cache_key(channels: &HashMap<FeedCacheKey, CachedFeed>) -> Option<FeedCacheKey> {
     channels
         .iter()
-        .find(|(request, _)| &request.cache_key() == key)
-        .map(|(_, feed)| feed.clone())
+        .min_by_key(|(_, entry)| entry.last_accessed)
+        .map(|(key, _)| key.clone())
 }
 
 async fn build_feed(request: &FeedRequest) -> Result<GeneratedFeed, String> {
@@ -1360,30 +1575,71 @@ async fn fetch_works_for_filter(filter: Option<String>) -> Result<Vec<Work>, Str
         None => return Ok(Vec::new()),
     };
 
-    let mut pairs = vec![
-        ("filter".to_string(), filter),
-        ("sort".to_string(), "publication_date:desc".to_string()),
-        ("per_page".to_string(), "50".to_string()),
-    ];
-    if let Some(m) = mailto() {
-        pairs.push(("mailto".to_string(), m));
+    let max_works = env::var("GSRF_MAX_OPENALEX_WORKS")
+        .ok()
+        .map(|value| {
+            value.parse::<usize>().map_err(|_| {
+                format!("GSRF_MAX_OPENALEX_WORKS must be a positive integer, got \"{value}\".")
+            })
+        })
+        .transpose()?
+        .unwrap_or(DEFAULT_MAX_OPENALEX_WORKS);
+    if max_works == 0 {
+        return Err("GSRF_MAX_OPENALEX_WORKS must be greater than zero.".to_string());
     }
+    fetch_works_for_filter_from(&CLIENT, API_BASE, filter, max_works).await
+}
 
-    let url = url::Url::parse_with_params(&format!("{API_BASE}/works"), &pairs)
-        .map_err(|error| format!("Failed to build OpenAlex URL: {error}"))?;
-    let response = CLIENT
-        .get(url)
-        .send()
-        .await
-        .map_err(|error| format!("OpenAlex request failed: {error}"))?
-        .error_for_status()
-        .map_err(|error| format!("OpenAlex request failed: {error}"))?;
-    let body = response
-        .json::<WorksResponse>()
-        .await
-        .map_err(|error| format!("Failed to parse OpenAlex response: {error}"))?;
-
-    Ok(body.results)
+async fn fetch_works_for_filter_from(
+    client: &reqwest::Client,
+    api_base: &str,
+    filter: String,
+    max_works: usize,
+) -> Result<Vec<Work>, String> {
+    let mut works = Vec::new();
+    let mut cursor = "*".to_string();
+    let mut seen_cursors = HashSet::new();
+    loop {
+        if !seen_cursors.insert(cursor.clone()) {
+            return Err("OpenAlex returned a repeated pagination cursor.".to_string());
+        }
+        let mut pairs = vec![
+            ("filter".to_string(), filter.clone()),
+            ("sort".to_string(), "publication_date:desc".to_string()),
+            ("per_page".to_string(), OPENALEX_PAGE_SIZE.to_string()),
+            ("cursor".to_string(), cursor),
+        ];
+        if let Some(m) = mailto() {
+            pairs.push(("mailto".to_string(), m));
+        }
+        let url = url::Url::parse_with_params(&format!("{api_base}/works"), &pairs)
+            .map_err(|error| format!("Failed to build OpenAlex URL: {error}"))?;
+        let response = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|error| format!("OpenAlex request failed: {error}"))?
+            .error_for_status()
+            .map_err(|error| format!("OpenAlex request failed: {error}"))?;
+        let mut body = response
+            .json::<WorksResponse>()
+            .await
+            .map_err(|error| format!("Failed to parse OpenAlex response: {error}"))?;
+        let next_cursor = body
+            .meta
+            .ok_or_else(|| "OpenAlex response did not contain pagination metadata.".to_string())?
+            .next_cursor;
+        if works.len() + body.results.len() > max_works {
+            return Err(format!(
+                "OpenAlex query exceeded the configured {max_works}-work limit."
+            ));
+        }
+        works.append(&mut body.results);
+        match next_cursor {
+            Some(next) => cursor = next,
+            None => return Ok(works),
+        }
+    }
 }
 
 fn work_to_item(work: &Work) -> rss::Item {
@@ -1581,6 +1837,8 @@ fn to_rfc2822(date: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener as StdTcpListener;
 
     fn work(id: Option<&str>, date: Option<&str>) -> Work {
         serde_json::from_value(serde_json::json!({
@@ -1631,6 +1889,45 @@ mod tests {
 
     fn ids(works: &[Work]) -> Vec<Option<String>> {
         works.iter().map(|w| w.id.clone()).collect()
+    }
+
+    fn empty_generated_feed() -> GeneratedFeed {
+        GeneratedFeed {
+            channel: Channel::default(),
+            reader: reader::Feed {
+                title: String::new(),
+                description: String::new(),
+                publications: Vec::new(),
+                paper_sources: Vec::new(),
+            },
+        }
+    }
+
+    fn spawn_json_server(
+        responses: Vec<&'static str>,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            responses
+                .into_iter()
+                .map(|body| {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut request = [0_u8; 4096];
+                    let length = stream.read(&mut request).unwrap();
+                    let request = String::from_utf8_lossy(&request[..length]).into_owned();
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .unwrap();
+                    request
+                })
+                .collect()
+        });
+        (address, handle)
     }
 
     #[test]
@@ -1980,6 +2277,169 @@ mod tests {
             Provider::GoogleScholar
         );
         assert!(Provider::parse("unknown").is_err());
+    }
+
+    #[test]
+    fn feed_titles_are_part_of_cache_identity() {
+        let mut first = FeedRequest {
+            provider: Provider::OpenAlex,
+            author_ids: vec!["A1".to_string()],
+            google_scholar_authors: Vec::new(),
+            tracked_author_names: Vec::new(),
+            curated_sources: Vec::new(),
+            biorxiv_categories: Vec::new(),
+            arxiv_categories: Vec::new(),
+            source_ids: Vec::new(),
+            from: "2026-01-01".to_string(),
+            native_from: "2026-01-01".to_string(),
+            topics: Vec::new(),
+            include_core: true,
+            core_available: true,
+            available_curated_sources: Vec::new(),
+            title: Some("First title".to_string()),
+        };
+        let first_key = first.cache_key();
+        first.title = Some("Second title".to_string());
+
+        assert_ne!(first_key, first.cache_key());
+    }
+
+    #[test]
+    fn cache_capacity_evicts_the_least_recently_used_entry() {
+        let base = FeedRequest {
+            provider: Provider::OpenAlex,
+            author_ids: vec!["A1".to_string()],
+            google_scholar_authors: Vec::new(),
+            tracked_author_names: Vec::new(),
+            curated_sources: Vec::new(),
+            biorxiv_categories: Vec::new(),
+            arxiv_categories: Vec::new(),
+            source_ids: Vec::new(),
+            from: "2026-01-01".to_string(),
+            native_from: "2026-01-01".to_string(),
+            topics: Vec::new(),
+            include_core: true,
+            core_available: true,
+            available_curated_sources: Vec::new(),
+            title: None,
+        };
+        let mut newer = base.clone();
+        newer.author_ids = vec!["A2".to_string()];
+        let oldest_key = base.cache_key();
+        let newer_key = newer.cache_key();
+        let now = Instant::now();
+        let mut cache = HashMap::from([
+            (
+                oldest_key.clone(),
+                CachedFeed {
+                    feed: empty_generated_feed(),
+                    last_accessed: now - StdDuration::from_secs(2),
+                },
+            ),
+            (
+                newer_key,
+                CachedFeed {
+                    feed: empty_generated_feed(),
+                    last_accessed: now,
+                },
+            ),
+        ]);
+
+        let mut newest = base.clone();
+        newest.author_ids = vec!["A3".to_string()];
+        let newest_key = newest.cache_key();
+        insert_cache_entry(
+            &mut cache,
+            newest_key.clone(),
+            empty_generated_feed(),
+            now + StdDuration::from_secs(1),
+            2,
+        );
+
+        assert_eq!(cache.len(), 2);
+        assert!(!cache.contains_key(&oldest_key));
+        assert!(cache.contains_key(&newest_key));
+    }
+
+    #[test]
+    fn dynamic_request_limits_filter_count_and_value_size() {
+        let too_many = (0..=MAX_DYNAMIC_FILTER_VALUES)
+            .map(|index| ("author_id".to_string(), format!("A{index}")))
+            .collect::<Vec<_>>();
+        assert!(validate_dynamic_request("", &too_many)
+            .unwrap_err()
+            .contains("dynamic filter values"));
+
+        let oversized = vec![("author".to_string(), "a".repeat(MAX_QUERY_VALUE_LENGTH + 1))];
+        assert!(validate_dynamic_request("", &oversized)
+            .unwrap_err()
+            .contains("may not exceed"));
+    }
+
+    #[test]
+    fn rate_limit_rejects_excess_requests_and_recovers_after_window() {
+        let client_ip = "192.0.2.1".parse().unwrap();
+        let now = Instant::now();
+        let mut clients = HashMap::new();
+
+        for _ in 0..MAX_REQUESTS_PER_MINUTE {
+            assert!(allow_request(&mut clients, client_ip, now));
+        }
+        assert!(!allow_request(&mut clients, client_ip, now));
+        assert!(allow_request(
+            &mut clients,
+            client_ip,
+            now + StdDuration::from_secs(60)
+        ));
+    }
+
+    #[test]
+    fn forwarded_client_ip_requires_explicit_proxy_trust() {
+        let peer_ip = "192.0.2.1".parse().unwrap();
+        let forwarded_ip = "198.51.100.2".parse().unwrap();
+
+        assert_eq!(
+            select_client_ip(peer_ip, Some(forwarded_ip), false),
+            peer_ip
+        );
+        assert_eq!(
+            select_client_ip(peer_ip, Some(forwarded_ip), true),
+            forwarded_ip
+        );
+    }
+
+    #[tokio::test]
+    async fn openalex_queries_follow_pagination_cursors() {
+        let (api_base, server) = spawn_json_server(vec![
+            r#"{"results":[{"id":"W1"}],"meta":{"next_cursor":"next-page"}}"#,
+            r#"{"results":[{"id":"W2"}],"meta":{"next_cursor":null}}"#,
+        ]);
+
+        let works = fetch_works_for_filter_from(&CLIENT, &api_base, "author.id:A1".into(), 10)
+            .await
+            .unwrap();
+        let requests = server.join().unwrap();
+
+        assert_eq!(ids(&works), vec![Some("W1".into()), Some("W2".into())]);
+        assert!(requests[0].contains("cursor=*"));
+        assert!(requests[1].contains("cursor=next-page"));
+        assert!(requests
+            .iter()
+            .all(|request| request.contains("per_page=200")));
+    }
+
+    #[tokio::test]
+    async fn openalex_queries_fail_instead_of_silently_truncating() {
+        let (api_base, server) = spawn_json_server(vec![
+            r#"{"results":[{"id":"W1"},{"id":"W2"}],"meta":{"next_cursor":"next-page"}}"#,
+        ]);
+
+        let error = fetch_works_for_filter_from(&CLIENT, &api_base, "author.id:A1".into(), 1)
+            .await
+            .unwrap_err();
+        server.join().unwrap();
+
+        assert!(error.contains("configured 1-work limit"));
     }
 
     #[test]
