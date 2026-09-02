@@ -295,7 +295,9 @@ provider and configured curated collection are selected by default; native categ
 Unchecking both core sources and choosing native categories produces a preprint-only reader.
 Multiple selected authors and paper sources use OR semantics within their respective groups.
 Selections are preserved when opening an article, returning to the reader, and opening its
-corresponding raw RSS. Parameter-free reader and RSS URLs retain the focused default feed.
+corresponding raw RSS. At least one paper source remains selected; an empty no-JavaScript
+submission restores the configured defaults. Parameter-free reader and RSS URLs retain the
+focused default feed.
 
 Available bioRxiv values are `synthetic_biology`, `bioinformatics`, `bioengineering`,
 `systems_biology`, `genomics`, `biochemistry`, and `molecular_biology`. Available arXiv values

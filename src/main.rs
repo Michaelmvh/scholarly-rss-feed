@@ -565,8 +565,8 @@ async fn resolve_feed_request(
     let adhoc_biorxiv_categories = collect_param(params, BIORXIV_CATEGORY_PARAM);
     let adhoc_arxiv_categories = collect_param(params, ARXIV_CATEGORY_PARAM);
     let selected_paper_sources = collect_param(params, PAPER_SOURCE_PARAM);
-    let custom_paper_sources =
-        first_param(params, PAPER_SOURCE_MODE_PARAM).as_deref() == Some(CUSTOM_PAPER_SOURCES);
+    let custom_paper_sources = !selected_paper_sources.is_empty()
+        && first_param(params, PAPER_SOURCE_MODE_PARAM).as_deref() == Some(CUSTOM_PAPER_SOURCES);
     let mut adhoc_topics = collect_param(params, "topic");
     adhoc_topics.extend(collect_param(params, "concept"));
     let adhoc_from = first_param(params, "from");
@@ -2233,7 +2233,7 @@ arxiv_categories = ["q-bio.BM"]
     }
 
     #[tokio::test]
-    async fn explicit_empty_source_selection_still_renders_the_reader() {
+    async fn explicit_empty_source_selection_restores_defaults() {
         let config: Config = toml::from_str(include_str!("../feeds.toml")).unwrap();
         let params = vec![(
             PAPER_SOURCE_MODE_PARAM.to_string(),
@@ -2245,9 +2245,9 @@ arxiv_categories = ["q-bio.BM"]
             .unwrap()
             .unwrap();
 
-        assert!(!request.include_core);
-        assert!(request.author_ids.is_empty());
-        assert!(request.curated_sources.is_empty());
+        assert!(request.include_core);
+        assert!(!request.author_ids.is_empty());
+        assert_eq!(request.curated_sources, vec!["peldom-protein-design"]);
         assert!(request.biorxiv_categories.is_empty());
         assert!(request.arxiv_categories.is_empty());
     }

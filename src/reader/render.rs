@@ -83,7 +83,7 @@ pub fn render_feed(feed: &Feed, params: &[(String, String)]) -> String {
   <link rel="alternate" type="application/rss+xml" title="{title}" href="{rss_url}">
   <title>{title}</title>
   <link rel="stylesheet" href="/reader.css?v=5">
-  <script src="/reader.js?v=4" defer></script>
+  <script src="/reader.js?v=5" defer></script>
 </head>
 <body>
   <main>
@@ -373,7 +373,7 @@ fn render_paper_source_filter(options: &[super::PaperSourceOption]) -> String {
     }
     let selected = options.iter().filter(|option| option.selected).count();
     let summary = match selected {
-        0 => "No sources".to_string(),
+        0 => "Default sources".to_string(),
         1 => options
             .iter()
             .find(|option| option.selected)
@@ -413,14 +413,12 @@ fn render_paper_source_filter(options: &[super::PaperSourceOption]) -> String {
 
     format!(
         r#"<details class="filter-multiselect" data-multiselect>
-            <summary><span class="filter-label">Paper sources</span><span class="filter-value" data-selection-summary data-empty-label="No sources">{}</span></summary>
+            <summary><span class="filter-label">Paper sources</span><span class="filter-value" data-selection-summary>{}</span></summary>
             <div class="filter-options">
-              <label class="filter-checkbox filter-select-all" hidden><input type="checkbox" data-select-all{}><span>No sources</span></label>
               <div class="filter-option-list">{groups}</div>
             </div>
           </details>"#,
-        escape_html(&summary),
-        if selected == 0 { " checked" } else { "" }
+        escape_html(&summary)
     )
 }
 
@@ -667,6 +665,7 @@ mod tests {
 
         assert!(html.contains("Paper sources"));
         assert!(html.contains(r#"name="paper_sources" value="custom""#));
+        assert!(!html.contains("No sources"));
         assert!(html.contains(
             r#"name="paper_source" value="core" data-label="Tracked authors and journals" checked"#
         ));
@@ -738,7 +737,7 @@ mod tests {
         ));
         assert!(!html.contains("Collection source"));
         assert!(html.contains("?view_author=ada+lovelace&amp;view_source=curated-source"));
-        assert!(html.contains(r#"<script src="/reader.js?v=4" defer></script>"#));
+        assert!(html.contains(r#"<script src="/reader.js?v=5" defer></script>"#));
         assert!(html.contains(
             r#"<label class="filter-checkbox filter-select-all" hidden><input type="checkbox" data-select-all><span>All tracked authors</span>"#
         ));

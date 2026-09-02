@@ -20,11 +20,15 @@
     const summary = picker.querySelector("[data-selection-summary]");
     let dirty = false;
 
-    selectAll.closest(".filter-select-all").hidden = false;
+    if (selectAll) {
+      selectAll.closest(".filter-select-all").hidden = false;
+    }
 
     const updateSummary = () => {
       const selected = checkboxes.filter((checkbox) => checkbox.checked);
-      selectAll.checked = selected.length === 0;
+      if (selectAll) {
+        selectAll.checked = selected.length === 0;
+      }
       summary.textContent =
         selected.length === 0
           ? summary.dataset.emptyLabel || "Any tracked author"
@@ -35,22 +39,28 @@
 
     checkboxes.forEach((checkbox) => {
       checkbox.addEventListener("change", () => {
+        if (!selectAll && !checkboxes.some((candidate) => candidate.checked)) {
+          checkbox.checked = true;
+          return;
+        }
         dirty = true;
         updateSummary();
       });
     });
 
-    selectAll.addEventListener("change", () => {
-      if (selectAll.checked) {
-        checkboxes.forEach((checkbox) => {
-          checkbox.checked = false;
-        });
-        dirty = true;
-        updateSummary();
-      } else if (!checkboxes.some((checkbox) => checkbox.checked)) {
-        selectAll.checked = true;
-      }
-    });
+    if (selectAll) {
+      selectAll.addEventListener("change", () => {
+        if (selectAll.checked) {
+          checkboxes.forEach((checkbox) => {
+            checkbox.checked = false;
+          });
+          dirty = true;
+          updateSummary();
+        } else if (!checkboxes.some((checkbox) => checkbox.checked)) {
+          selectAll.checked = true;
+        }
+      });
+    }
 
     picker.addEventListener("toggle", () => {
       if (!picker.open && dirty) form.requestSubmit();
