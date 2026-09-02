@@ -68,6 +68,13 @@ pub fn validate_sources(source_names: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+pub fn source_details(source_name: &str) -> Option<(&'static str, &'static str)> {
+    match source_name {
+        PELDOM_PROTEIN_DESIGN => Some((PELDOM_SOURCE_NAME, PELDOM_REPOSITORY_URL)),
+        _ => None,
+    }
+}
+
 pub async fn fetch_sources(
     client: &reqwest::Client,
     source_names: &[String],

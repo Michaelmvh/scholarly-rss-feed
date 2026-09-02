@@ -60,6 +60,13 @@ const DEFAULT_NATIVE_FROM_DAYS: u32 = 7;
 pub(crate) const BIORXIV_CATEGORY_PARAM: &str = "biorxiv_category";
 pub(crate) const ARXIV_CATEGORY_PARAM: &str = "arxiv_category";
 pub(crate) const NATIVE_DAYS_PARAM: &str = "native_days";
+pub(crate) const PAPER_SOURCE_MODE_PARAM: &str = "paper_sources";
+pub(crate) const PAPER_SOURCE_PARAM: &str = "paper_source";
+const CUSTOM_PAPER_SOURCES: &str = "custom";
+const CORE_PAPER_SOURCE: &str = "core";
+const CURATED_SOURCE_PREFIX: &str = "curated:";
+const BIORXIV_SOURCE_PREFIX: &str = "biorxiv:";
+const ARXIV_SOURCE_PREFIX: &str = "arxiv:";
 const APPLE_TOUCH_ICON: &[u8] = include_bytes!("assets/apple-touch-icon.png");
 
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
@@ -135,19 +142,23 @@ struct ComparisonArgs {
     source_name: String,
 }
 
-type FeedCacheKey = (
-    Provider,
-    Vec<String>,
-    Vec<String>,
-    Vec<String>,
-    Vec<String>,
-    Vec<String>,
-    Vec<String>,
-    Vec<String>,
-    String,
-    String,
-    Vec<String>,
-);
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+struct FeedCacheKey {
+    provider: Provider,
+    author_ids: Vec<String>,
+    google_scholar_authors: Vec<String>,
+    tracked_author_names: Vec<String>,
+    curated_sources: Vec<String>,
+    biorxiv_categories: Vec<String>,
+    arxiv_categories: Vec<String>,
+    source_ids: Vec<String>,
+    from: String,
+    native_from: String,
+    topics: Vec<String>,
+    include_core: bool,
+    core_available: bool,
+    available_curated_sources: Vec<String>,
+}
 type FeedBuild = Arc<tokio::sync::OnceCell<Result<GeneratedFeed, String>>>;
 type FeedBuilds = Arc<RwLock<HashMap<FeedCacheKey, FeedBuild>>>;
 
@@ -175,25 +186,34 @@ struct FeedRequest {
     native_from: String,
     /// Sorted OpenAlex topic ids.
     topics: Vec<String>,
+    /// Whether the configured author/journal provider side is included.
+    include_core: bool,
+    /// Whether this feed has a configured or ad-hoc provider side available.
+    core_available: bool,
+    /// Curated sources offered by this feed, including deselected sources.
+    available_curated_sources: Vec<String>,
     /// Optional channel title carried alongside (not part of identity below).
     title: Option<String>,
 }
 
 impl FeedRequest {
     fn cache_key(&self) -> FeedCacheKey {
-        (
-            self.provider,
-            self.author_ids.clone(),
-            self.google_scholar_authors.clone(),
-            self.tracked_author_names.clone(),
-            self.curated_sources.clone(),
-            self.biorxiv_categories.clone(),
-            self.arxiv_categories.clone(),
-            self.source_ids.clone(),
-            self.from.clone(),
-            self.native_from.clone(),
-            self.topics.clone(),
-        )
+        FeedCacheKey {
+            provider: self.provider,
+            author_ids: self.author_ids.clone(),
+            google_scholar_authors: self.google_scholar_authors.clone(),
+            tracked_author_names: self.tracked_author_names.clone(),
+            curated_sources: self.curated_sources.clone(),
+            biorxiv_categories: self.biorxiv_categories.clone(),
+            arxiv_categories: self.arxiv_categories.clone(),
+            source_ids: self.source_ids.clone(),
+            from: self.from.clone(),
+            native_from: self.native_from.clone(),
+            topics: self.topics.clone(),
+            include_core: self.include_core,
+            core_available: self.core_available,
+            available_curated_sources: self.available_curated_sources.clone(),
+        }
     }
 }
 
@@ -544,6 +564,9 @@ async fn resolve_feed_request(
     let adhoc_journals = collect_param(params, "journal");
     let adhoc_biorxiv_categories = collect_param(params, BIORXIV_CATEGORY_PARAM);
     let adhoc_arxiv_categories = collect_param(params, ARXIV_CATEGORY_PARAM);
+    let selected_paper_sources = collect_param(params, PAPER_SOURCE_PARAM);
+    let custom_paper_sources =
+        first_param(params, PAPER_SOURCE_MODE_PARAM).as_deref() == Some(CUSTOM_PAPER_SOURCES);
     let mut adhoc_topics = collect_param(params, "topic");
     adhoc_topics.extend(collect_param(params, "concept"));
     let adhoc_from = first_param(params, "from");
@@ -580,7 +603,8 @@ async fn resolve_feed_request(
                         }
                     },
                     None if !adhoc_biorxiv_categories.is_empty()
-                        || !adhoc_arxiv_categories.is_empty() =>
+                        || !adhoc_arxiv_categories.is_empty()
+                        || custom_paper_sources =>
                     {
                         None
                     }
@@ -595,32 +619,82 @@ async fn resolve_feed_request(
     let from = adhoc_from
         .or_else(|| feed.from.clone())
         .unwrap_or_else(|| default_from_date(feed.from_days.or(config.settings.from_days)));
-    let mut curated_sources = feed.curated_sources.clone();
+    let core_available = !feed.people.is_empty()
+        || !feed.author_ids.is_empty()
+        || !feed.orcids.is_empty()
+        || !feed.authors.is_empty()
+        || !feed.google_scholar_authors.is_empty()
+        || !feed.source_ids.is_empty()
+        || !feed.issns.is_empty()
+        || !feed.journals.is_empty()
+        || has_adhoc;
+    let include_core = !custom_paper_sources
+        || selected_paper_sources
+            .iter()
+            .any(|source| source == CORE_PAPER_SOURCE);
+    let mut available_curated_sources = feed.curated_sources.clone();
+    available_curated_sources.extend(
+        selected_paper_sources
+            .iter()
+            .filter_map(|source| source.strip_prefix(CURATED_SOURCE_PREFIX))
+            .map(str::to_string),
+    );
+    available_curated_sources.sort();
+    available_curated_sources.dedup();
+    curated::validate_sources(&available_curated_sources)
+        .map_err(ResolveFeedError::InvalidRequest)?;
+    validate_paper_source_values(&selected_paper_sources)
+        .map_err(ResolveFeedError::InvalidRequest)?;
+    let mut curated_sources = if custom_paper_sources {
+        selected_paper_sources
+            .iter()
+            .filter_map(|source| source.strip_prefix(CURATED_SOURCE_PREFIX))
+            .map(str::to_string)
+            .collect()
+    } else {
+        feed.curated_sources.clone()
+    };
     curated_sources.sort();
     curated_sources.dedup();
     curated::validate_sources(&curated_sources).map_err(ResolveFeedError::InvalidRequest)?;
-    let mut biorxiv_categories = feed
-        .biorxiv_categories
+    let selected_biorxiv_categories = selected_paper_sources
         .iter()
-        .chain(&adhoc_biorxiv_categories)
-        .cloned()
+        .filter_map(|source| source.strip_prefix(BIORXIV_SOURCE_PREFIX))
+        .map(str::to_string)
         .collect::<Vec<_>>();
+    let mut biorxiv_categories = if custom_paper_sources {
+        selected_biorxiv_categories.iter()
+    } else {
+        feed.biorxiv_categories.iter()
+    }
+    .chain(&adhoc_biorxiv_categories)
+    .cloned()
+    .collect::<Vec<_>>();
     biorxiv_categories.sort();
     biorxiv_categories.dedup();
     discovery::biorxiv::validate_categories(&biorxiv_categories)
         .map_err(ResolveFeedError::InvalidRequest)?;
-    let mut arxiv_categories = feed
-        .arxiv_categories
+    let selected_arxiv_categories = selected_paper_sources
         .iter()
-        .chain(&adhoc_arxiv_categories)
-        .cloned()
+        .filter_map(|source| source.strip_prefix(ARXIV_SOURCE_PREFIX))
+        .map(str::to_string)
         .collect::<Vec<_>>();
+    let mut arxiv_categories = if custom_paper_sources {
+        selected_arxiv_categories.iter()
+    } else {
+        feed.arxiv_categories.iter()
+    }
+    .chain(&adhoc_arxiv_categories)
+    .cloned()
+    .collect::<Vec<_>>();
     arxiv_categories.sort();
     arxiv_categories.dedup();
     discovery::arxiv::validate_categories(&arxiv_categories)
         .map_err(ResolveFeedError::InvalidRequest)?;
-    let has_adhoc_native =
-        !adhoc_biorxiv_categories.is_empty() || !adhoc_arxiv_categories.is_empty();
+    let has_adhoc_native = !adhoc_biorxiv_categories.is_empty()
+        || !adhoc_arxiv_categories.is_empty()
+        || (custom_paper_sources
+            && (!selected_biorxiv_categories.is_empty() || !selected_arxiv_categories.is_empty()));
     let native_from = if has_adhoc_native {
         let days = first_param(params, NATIVE_DAYS_PARAM)
             .map(|value| {
@@ -662,9 +736,10 @@ async fn resolve_feed_request(
     tracked_author_names.dedup();
 
     if provider == Provider::GoogleScholar {
-        let mut google_scholar_authors = feed
-            .people
-            .iter()
+        let mut google_scholar_authors = include_core
+            .then_some(())
+            .into_iter()
+            .flat_map(|_| feed.people.iter())
             .map(|person| {
                 person
                     .google_scholar_name
@@ -677,6 +752,9 @@ async fn resolve_feed_request(
             .map(|name| name.trim().to_string())
             .filter(|name| !name.is_empty())
             .collect::<Vec<_>>();
+        if !include_core {
+            google_scholar_authors.clear();
+        }
         google_scholar_authors.sort();
         google_scholar_authors.dedup();
 
@@ -684,6 +762,7 @@ async fn resolve_feed_request(
             && curated_sources.is_empty()
             && biorxiv_categories.is_empty()
             && arxiv_categories.is_empty()
+            && !custom_paper_sources
         {
             return Err(ResolveFeedError::InvalidRequest(
                 "The Google Scholar provider requires at least one \
@@ -705,43 +784,48 @@ async fn resolve_feed_request(
             from,
             native_from,
             topics: Vec::new(),
+            include_core,
+            core_available,
+            available_curated_sources,
             title: feed.title.clone(),
         }));
     }
 
     // Gather author identifiers from feed config + ad-hoc params.
     let mut author_ids: Vec<String> = Vec::new();
-    for id in feed
-        .people
-        .iter()
-        .filter_map(|person| person.openalex_id.as_deref())
-    {
-        author_ids.push(normalize_id(id));
-    }
-    for id in feed.author_ids.iter().chain(adhoc_author_ids.iter()) {
-        author_ids.push(normalize_id(id));
-    }
-
-    for orcid in feed.orcids.iter().chain(adhoc_orcids.iter()) {
-        match resolve_orcid(orcid)
-            .await
-            .map_err(ResolveFeedError::Provider)?
+    if include_core {
+        for id in feed
+            .people
+            .iter()
+            .filter_map(|person| person.openalex_id.as_deref())
         {
-            Some(id) => author_ids.push(id),
-            None => eprintln!("Could not resolve ORCID \"{orcid}\""),
+            author_ids.push(normalize_id(id));
         }
-    }
+        for id in feed.author_ids.iter().chain(adhoc_author_ids.iter()) {
+            author_ids.push(normalize_id(id));
+        }
 
-    for name in feed.authors.iter().chain(adhoc_authors.iter()) {
-        match resolve_author_name(name)
-            .await
-            .map_err(ResolveFeedError::Provider)?
-        {
-            Some((id, display)) => {
-                println!("Resolved author \"{name}\" -> {id} ({display})");
-                author_ids.push(id);
+        for orcid in feed.orcids.iter().chain(adhoc_orcids.iter()) {
+            match resolve_orcid(orcid)
+                .await
+                .map_err(ResolveFeedError::Provider)?
+            {
+                Some(id) => author_ids.push(id),
+                None => eprintln!("Could not resolve ORCID \"{orcid}\""),
             }
-            None => eprintln!("Could not resolve author name \"{name}\""),
+        }
+
+        for name in feed.authors.iter().chain(adhoc_authors.iter()) {
+            match resolve_author_name(name)
+                .await
+                .map_err(ResolveFeedError::Provider)?
+            {
+                Some((id, display)) => {
+                    println!("Resolved author \"{name}\" -> {id} ({display})");
+                    author_ids.push(id);
+                }
+                None => eprintln!("Could not resolve author name \"{name}\""),
+            }
         }
     }
 
@@ -751,30 +835,32 @@ async fn resolve_feed_request(
 
     // Gather journal (source) identifiers from feed config + ad-hoc params.
     let mut source_ids: Vec<String> = Vec::new();
-    for id in feed.source_ids.iter().chain(adhoc_source_ids.iter()) {
-        source_ids.push(normalize_id(id));
-    }
-
-    for issn in feed.issns.iter().chain(adhoc_issns.iter()) {
-        match resolve_issn(issn)
-            .await
-            .map_err(ResolveFeedError::Provider)?
-        {
-            Some(id) => source_ids.push(id),
-            None => eprintln!("Could not resolve ISSN \"{issn}\""),
+    if include_core {
+        for id in feed.source_ids.iter().chain(adhoc_source_ids.iter()) {
+            source_ids.push(normalize_id(id));
         }
-    }
 
-    for name in feed.journals.iter().chain(adhoc_journals.iter()) {
-        match resolve_journal_name(name)
-            .await
-            .map_err(ResolveFeedError::Provider)?
-        {
-            Some((id, display)) => {
-                println!("Resolved journal \"{name}\" -> {id} ({display})");
-                source_ids.push(id);
+        for issn in feed.issns.iter().chain(adhoc_issns.iter()) {
+            match resolve_issn(issn)
+                .await
+                .map_err(ResolveFeedError::Provider)?
+            {
+                Some(id) => source_ids.push(id),
+                None => eprintln!("Could not resolve ISSN \"{issn}\""),
             }
-            None => eprintln!("Could not resolve journal name \"{name}\""),
+        }
+
+        for name in feed.journals.iter().chain(adhoc_journals.iter()) {
+            match resolve_journal_name(name)
+                .await
+                .map_err(ResolveFeedError::Provider)?
+            {
+                Some((id, display)) => {
+                    println!("Resolved journal \"{name}\" -> {id} ({display})");
+                    source_ids.push(id);
+                }
+                None => eprintln!("Could not resolve journal name \"{name}\""),
+            }
         }
     }
 
@@ -787,6 +873,7 @@ async fn resolve_feed_request(
         && curated_sources.is_empty()
         && biorxiv_categories.is_empty()
         && arxiv_categories.is_empty()
+        && !custom_paper_sources
     {
         return Ok(None);
     }
@@ -813,8 +900,33 @@ async fn resolve_feed_request(
         from,
         native_from,
         topics,
+        include_core,
+        core_available,
+        available_curated_sources,
         title: feed.title.clone(),
     }))
+}
+
+fn validate_paper_source_values(sources: &[String]) -> Result<(), String> {
+    for source in sources {
+        if source == CORE_PAPER_SOURCE {
+            continue;
+        }
+        if let Some(source_name) = source.strip_prefix(CURATED_SOURCE_PREFIX) {
+            curated::validate_sources(&[source_name.to_string()])?;
+            continue;
+        }
+        if let Some(category) = source.strip_prefix(BIORXIV_SOURCE_PREFIX) {
+            discovery::biorxiv::validate_categories(&[category.to_string()])?;
+            continue;
+        }
+        if let Some(category) = source.strip_prefix(ARXIV_SOURCE_PREFIX) {
+            discovery::arxiv::validate_categories(&[category.to_string()])?;
+            continue;
+        }
+        return Err(format!("Unknown paper source \"{source}\"."));
+    }
+    Ok(())
 }
 
 /// Compute a YYYY-MM-DD date `from_days` (or the default window) in the past.
@@ -1030,37 +1142,55 @@ async fn build_feed(request: &FeedRequest) -> Result<GeneratedFeed, String> {
 
     let publications = works.iter().map(work_to_publication).collect();
 
+    let mut paper_sources = Vec::new();
+    if request.core_available {
+        paper_sources.push(reader::PaperSourceOption {
+            value: CORE_PAPER_SOURCE.to_string(),
+            label: "Tracked authors and journals".to_string(),
+            group: "Core feed",
+            selected: request.include_core,
+        });
+    }
+    for source_name in &request.available_curated_sources {
+        if let Some((label, _)) = curated::source_details(source_name) {
+            paper_sources.push(reader::PaperSourceOption {
+                value: format!("{CURATED_SOURCE_PREFIX}{source_name}"),
+                label: label.to_string(),
+                group: "Core feed",
+                selected: request.curated_sources.contains(source_name),
+            });
+        }
+    }
+    paper_sources.extend(discovery::biorxiv::CATEGORIES.iter().map(|(value, label)| {
+        reader::PaperSourceOption {
+            value: format!("{BIORXIV_SOURCE_PREFIX}{value}"),
+            label: (*label).to_string(),
+            group: "bioRxiv",
+            selected: request
+                .biorxiv_categories
+                .iter()
+                .any(|category| category == value),
+        }
+    }));
+    paper_sources.extend(discovery::arxiv::CATEGORIES.iter().map(|(value, label)| {
+        reader::PaperSourceOption {
+            value: format!("{ARXIV_SOURCE_PREFIX}{value}"),
+            label: format!("{label} ({value})"),
+            group: "arXiv",
+            selected: request
+                .arxiv_categories
+                .iter()
+                .any(|category| category == value),
+        }
+    }));
+
     Ok(GeneratedFeed {
         channel,
         reader: reader::Feed {
             title,
             description,
             publications,
-            native_categories: discovery::biorxiv::CATEGORIES
-                .iter()
-                .map(|(value, label)| reader::NativeCategoryOption {
-                    parameter: BIORXIV_CATEGORY_PARAM,
-                    value: (*value).to_string(),
-                    label: (*label).to_string(),
-                    repository: "bioRxiv",
-                    selected: request
-                        .biorxiv_categories
-                        .iter()
-                        .any(|category| category == value),
-                })
-                .chain(discovery::arxiv::CATEGORIES.iter().map(|(value, label)| {
-                    reader::NativeCategoryOption {
-                        parameter: ARXIV_CATEGORY_PARAM,
-                        value: (*value).to_string(),
-                        label: format!("{label} ({value})"),
-                        repository: "arXiv",
-                        selected: request
-                            .arxiv_categories
-                            .iter()
-                            .any(|category| category == value),
-                    }
-                }))
-                .collect(),
+            paper_sources,
         },
     })
 }
@@ -2037,6 +2167,114 @@ arxiv_categories = ["q-bio.BM"]
         assert_eq!(request.arxiv_categories, vec!["q-bio.GN"]);
         assert_eq!(request.native_from, default_from_date(Some(14)));
         assert_eq!(request.from, default_from_date(Some(365)));
+    }
+
+    #[tokio::test]
+    async fn explicit_paper_sources_can_select_only_preprints() {
+        let config: Config = toml::from_str(include_str!("../feeds.toml")).unwrap();
+        let params = vec![
+            (
+                PAPER_SOURCE_MODE_PARAM.to_string(),
+                CUSTOM_PAPER_SOURCES.to_string(),
+            ),
+            (
+                PAPER_SOURCE_PARAM.to_string(),
+                "biorxiv:synthetic_biology".to_string(),
+            ),
+            (PAPER_SOURCE_PARAM.to_string(), "arxiv:q-bio.BM".to_string()),
+        ];
+
+        let request = resolve_feed_request(&params, &config, Provider::OpenAlex)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(!request.include_core);
+        assert!(request.core_available);
+        assert!(request.author_ids.is_empty());
+        assert!(request.source_ids.is_empty());
+        assert!(request.curated_sources.is_empty());
+        assert_eq!(request.biorxiv_categories, vec!["synthetic_biology"]);
+        assert_eq!(request.arxiv_categories, vec!["q-bio.BM"]);
+        assert_eq!(
+            request.available_curated_sources,
+            vec!["peldom-protein-design"]
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_paper_sources_can_select_core_and_curated_sources() {
+        let config: Config = toml::from_str(include_str!("../feeds.toml")).unwrap();
+        let params = vec![
+            (
+                PAPER_SOURCE_MODE_PARAM.to_string(),
+                CUSTOM_PAPER_SOURCES.to_string(),
+            ),
+            (
+                PAPER_SOURCE_PARAM.to_string(),
+                CORE_PAPER_SOURCE.to_string(),
+            ),
+            (
+                PAPER_SOURCE_PARAM.to_string(),
+                "curated:peldom-protein-design".to_string(),
+            ),
+        ];
+
+        let request = resolve_feed_request(&params, &config, Provider::OpenAlex)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(request.include_core);
+        assert!(!request.author_ids.is_empty());
+        assert_eq!(request.curated_sources, vec!["peldom-protein-design"]);
+        assert!(request.biorxiv_categories.is_empty());
+        assert!(request.arxiv_categories.is_empty());
+    }
+
+    #[tokio::test]
+    async fn explicit_empty_source_selection_still_renders_the_reader() {
+        let config: Config = toml::from_str(include_str!("../feeds.toml")).unwrap();
+        let params = vec![(
+            PAPER_SOURCE_MODE_PARAM.to_string(),
+            CUSTOM_PAPER_SOURCES.to_string(),
+        )];
+
+        let request = resolve_feed_request(&params, &config, Provider::OpenAlex)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(!request.include_core);
+        assert!(request.author_ids.is_empty());
+        assert!(request.curated_sources.is_empty());
+        assert!(request.biorxiv_categories.is_empty());
+        assert!(request.arxiv_categories.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejects_unknown_explicit_paper_sources() {
+        let config: Config = toml::from_str(include_str!("../feeds.toml")).unwrap();
+        let params = vec![
+            (
+                PAPER_SOURCE_MODE_PARAM.to_string(),
+                CUSTOM_PAPER_SOURCES.to_string(),
+            ),
+            (
+                PAPER_SOURCE_PARAM.to_string(),
+                "repository:unknown".to_string(),
+            ),
+        ];
+
+        let error = resolve_feed_request(&params, &config, Provider::OpenAlex)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ResolveFeedError::InvalidRequest(message)
+                if message == "Unknown paper source \"repository:unknown\"."
+        ));
     }
 
     #[tokio::test]

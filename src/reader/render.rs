@@ -1,10 +1,11 @@
 use super::filters::{
-    is_view_param, FilterOptions, Period, ViewFilters, AUTHOR_PARAM, EXCLUDE_CURATED_ONLY,
-    PERIOD_PARAM, SOURCE_PARAM,
+    is_view_param, FilterOptions, Period, ViewFilters, AUTHOR_PARAM, PERIOD_PARAM,
 };
 use super::{Author, Feed, Publication};
 use crate::provenance::{DiscoverySource, DiscoverySourceKind};
-use crate::{ARXIV_CATEGORY_PARAM, BIORXIV_CATEGORY_PARAM};
+use crate::{
+    ARXIV_CATEGORY_PARAM, BIORXIV_CATEGORY_PARAM, PAPER_SOURCE_MODE_PARAM, PAPER_SOURCE_PARAM,
+};
 
 pub const FAVICON: &str = include_str!("../assets/apple-touch-icon.svg");
 pub const READER_CSS: &str = include_str!("../assets/reader.css");
@@ -30,7 +31,7 @@ pub fn render_feed(feed: &Feed, params: &[(String, String)]) -> String {
     } else {
         format!("{item_count} publications")
     };
-    let filter_form = render_filter_form(params, &filters, &options, &feed.native_categories);
+    let filter_form = render_filter_form(params, &filters, &options, &feed.paper_sources);
 
     let mut articles = String::new();
     for publication in publications {
@@ -302,7 +303,7 @@ fn render_filter_form(
     params: &[(String, String)],
     filters: &ViewFilters,
     options: &FilterOptions,
-    native_categories: &[super::NativeCategoryOption],
+    paper_sources: &[super::PaperSourceOption],
 ) -> String {
     let hidden_params = params
         .iter()
@@ -311,6 +312,8 @@ fn render_filter_form(
                 && name != "article"
                 && name != BIORXIV_CATEGORY_PARAM
                 && name != ARXIV_CATEGORY_PARAM
+                && name != PAPER_SOURCE_MODE_PARAM
+                && name != PAPER_SOURCE_PARAM
                 && !is_view_param(name)
         })
         .map(|(name, value)| {
@@ -337,8 +340,7 @@ fn render_filter_form(
     })
     .collect::<String>();
     let author_filter = render_author_filter(&filters.authors, &options.authors);
-    let source_filter = render_source_filter(filters.source.as_deref(), options);
-    let native_filter = render_native_category_filter(native_categories);
+    let paper_source_filter = render_paper_source_filter(paper_sources);
     let (filter_action_class, clear_link) = if filters == &ViewFilters::default() {
         ("filter-actions no-clear", String::new())
     } else {
@@ -354,24 +356,24 @@ fn render_filter_form(
     format!(
         r#"<form class="filters" method="get" action="/">
         {hidden_params}
+        <input type="hidden" name="{PAPER_SOURCE_MODE_PARAM}" value="custom">
         <div class="filter-fields">
           <label class="filter-select">Publication date<select name="{PERIOD_PARAM}" data-auto-submit>{periods}</select></label>
           {author_filter}
-          {source_filter}
-          {native_filter}
+          {paper_source_filter}
         </div>
         <div class="{filter_action_class}"><button class="apply-filters" type="submit">Apply filters</button>{clear_link}</div>
       </form>"#
     )
 }
 
-fn render_native_category_filter(options: &[super::NativeCategoryOption]) -> String {
+fn render_paper_source_filter(options: &[super::PaperSourceOption]) -> String {
     if options.is_empty() {
         return String::new();
     }
     let selected = options.iter().filter(|option| option.selected).count();
     let summary = match selected {
-        0 => "None selected".to_string(),
+        0 => "No sources".to_string(),
         1 => options
             .iter()
             .find(|option| option.selected)
@@ -381,21 +383,21 @@ fn render_native_category_filter(options: &[super::NativeCategoryOption]) -> Str
     };
     let mut repositories = options
         .iter()
-        .map(|option| option.repository)
+        .map(|option| option.group)
         .collect::<Vec<_>>();
     repositories.sort_unstable();
     repositories.dedup();
     let groups = repositories
         .into_iter()
-        .map(|repository| {
+        .map(|group| {
             let checkboxes = options
                 .iter()
-                .filter(|option| option.repository == repository)
+                .filter(|option| option.group == group)
                 .map(|option| {
                     let checked = if option.selected { " checked" } else { "" };
                     format!(
                         r#"<label class="filter-checkbox"><input type="checkbox" name="{}" value="{}" data-label="{}"{checked}><span>{}</span></label>"#,
-                        escape_html(option.parameter),
+                        PAPER_SOURCE_PARAM,
                         escape_html(&option.value),
                         escape_html(&option.label),
                         escape_html(&option.label)
@@ -404,16 +406,16 @@ fn render_native_category_filter(options: &[super::NativeCategoryOption]) -> Str
                 .collect::<String>();
             format!(
                 r#"<div class="filter-option-group"><strong>{}</strong>{checkboxes}</div>"#,
-                escape_html(repository)
+                escape_html(group)
             )
         })
         .collect::<String>();
 
     format!(
         r#"<details class="filter-multiselect" data-multiselect>
-            <summary><span class="filter-label">Preprint categories</span><span class="filter-value" data-selection-summary data-empty-label="None selected">{}</span></summary>
+            <summary><span class="filter-label">Paper sources</span><span class="filter-value" data-selection-summary data-empty-label="No sources">{}</span></summary>
             <div class="filter-options">
-              <label class="filter-checkbox filter-select-all" hidden><input type="checkbox" data-select-all{}><span>No preprints</span></label>
+              <label class="filter-checkbox filter-select-all" hidden><input type="checkbox" data-select-all{}><span>No sources</span></label>
               <div class="filter-option-list">{groups}</div>
             </div>
           </details>"#,
@@ -468,38 +470,6 @@ fn render_author_filter(
             </div>
           </details>"#,
         escape_html(&selection_summary)
-    )
-}
-
-fn render_source_filter(selected: Option<&str>, filter_options: &FilterOptions) -> String {
-    if filter_options.sources.is_empty() && !filter_options.can_exclude_collection_only {
-        return String::new();
-    }
-
-    let mut collection_options = filter_options.sources.iter().collect::<Vec<_>>();
-    collection_options.sort_by(|left, right| left.1.cmp(right.1));
-    let collection_options = collection_options
-        .into_iter()
-        .map(|(value, label)| render_option(value, label, selected == Some(value.as_str())))
-        .collect::<String>();
-    let provenance_option = if filter_options.can_exclude_collection_only {
-        render_option(
-            EXCLUDE_CURATED_ONLY,
-            "Exclude collection-only papers",
-            selected == Some(EXCLUDE_CURATED_ONLY),
-        )
-    } else {
-        String::new()
-    };
-    let collection_group = if collection_options.is_empty() {
-        String::new()
-    } else {
-        format!(r#"<optgroup label="Curated collections">{collection_options}</optgroup>"#)
-    };
-
-    format!(
-        r#"<label class="filter-select">Collection source<select name="{SOURCE_PARAM}" data-auto-submit>{}{provenance_option}{collection_group}</select></label>"#,
-        render_option("", "Any collection status", selected.is_none())
     )
 }
 
@@ -619,6 +589,7 @@ fn escape_html(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::filters::SOURCE_PARAM;
     use super::super::CollectionDate;
     use super::*;
     use crate::provenance::DiscoverySource;
@@ -628,7 +599,7 @@ mod tests {
         Feed {
             title: "Research & <Development>".to_string(),
             description: "Recent \"research\"".to_string(),
-            native_categories: Vec::new(),
+            paper_sources: Vec::new(),
             publications: vec![Publication {
                 id: Some("https://openalex.org/W1".to_string()),
                 title: "<script>alert('title')</script>".to_string(),
@@ -671,32 +642,39 @@ mod tests {
     #[test]
     fn renders_optional_native_categories_unselected() {
         let mut feed = sample_feed();
-        feed.native_categories = vec![
-            super::super::NativeCategoryOption {
-                parameter: BIORXIV_CATEGORY_PARAM,
-                value: "synthetic_biology".to_string(),
+        feed.paper_sources = vec![
+            super::super::PaperSourceOption {
+                value: "core".to_string(),
+                label: "Tracked authors and journals".to_string(),
+                group: "Core feed",
+                selected: true,
+            },
+            super::super::PaperSourceOption {
+                value: "biorxiv:synthetic_biology".to_string(),
                 label: "Synthetic Biology".to_string(),
-                repository: "bioRxiv",
+                group: "bioRxiv",
                 selected: false,
             },
-            super::super::NativeCategoryOption {
-                parameter: ARXIV_CATEGORY_PARAM,
-                value: "q-bio.BM".to_string(),
+            super::super::PaperSourceOption {
+                value: "arxiv:q-bio.BM".to_string(),
                 label: "Biomolecules (q-bio.BM)".to_string(),
-                repository: "arXiv",
+                group: "arXiv",
                 selected: false,
             },
         ];
 
         let html = render_feed(&feed, &[]);
 
-        assert!(html.contains("Preprint categories"));
-        assert!(html.contains(r#"name="biorxiv_category" value="synthetic_biology""#));
-        assert!(html.contains(r#"name="arxiv_category" value="q-bio.BM""#));
-        assert!(html.contains("None selected"));
-        assert!(
-            !html.contains(r#"value="synthetic_biology" data-label="Synthetic Biology" checked"#)
-        );
+        assert!(html.contains("Paper sources"));
+        assert!(html.contains(r#"name="paper_sources" value="custom""#));
+        assert!(html.contains(
+            r#"name="paper_source" value="core" data-label="Tracked authors and journals" checked"#
+        ));
+        assert!(html.contains(r#"name="paper_source" value="biorxiv:synthetic_biology""#));
+        assert!(html.contains(r#"name="paper_source" value="arxiv:q-bio.BM""#));
+        assert!(!html.contains(
+            r#"value="biorxiv:synthetic_biology" data-label="Synthetic Biology" checked"#
+        ));
     }
 
     #[test]
@@ -722,13 +700,15 @@ mod tests {
                 BIORXIV_CATEGORY_PARAM.to_string(),
                 "synthetic_biology".to_string(),
             ),
+            (PAPER_SOURCE_MODE_PARAM.to_string(), "custom".to_string()),
+            (PAPER_SOURCE_PARAM.to_string(), "arxiv:q-bio.BM".to_string()),
             (PERIOD_PARAM.to_string(), "90d".to_string()),
             (AUTHOR_PARAM.to_string(), "ada-lovelace".to_string()),
         ];
 
         assert_eq!(
             raw_feed_url(&params),
-            "?feed=my+field&author_id=A1&biorxiv_category=synthetic_biology&rss"
+            "?feed=my+field&author_id=A1&biorxiv_category=synthetic_biology&paper_sources=custom&paper_source=arxiv%3Aq-bio.BM&rss"
         );
         assert_eq!(raw_feed_url(&[]), "?rss");
     }
@@ -756,7 +736,7 @@ mod tests {
         assert!(html.contains(
             r#"<input type="checkbox" name="view_author" value="ada lovelace" data-label="Ada Lovelace" checked>"#
         ));
-        assert!(html.contains(r#"<option value="curated-source" selected>Curated Source</option>"#));
+        assert!(!html.contains("Collection source"));
         assert!(html.contains("?view_author=ada+lovelace&amp;view_source=curated-source"));
         assert!(html.contains(r#"<script src="/reader.js?v=4" defer></script>"#));
         assert!(html.contains(
@@ -818,10 +798,7 @@ mod tests {
         ));
         assert!(html.contains("Curated by"));
         assert!(html.contains("https://example.com/source?a=1&amp;b=2"));
-        assert!(html.contains(
-            r#"<option value="exclude-curated-only">Exclude collection-only papers</option>"#
-        ));
-        assert!(html.contains(r#"<optgroup label="Curated collections">"#));
+        assert!(!html.contains("Exclude collection-only papers"));
         assert!(html.contains(
             r#"<label class="filter-checkbox filter-select-all" hidden><input type="checkbox" data-select-all checked><span>All tracked authors</span>"#
         ));

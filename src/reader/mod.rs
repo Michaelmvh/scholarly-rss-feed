@@ -12,15 +12,14 @@ pub struct Feed {
     pub title: String,
     pub description: String,
     pub publications: Vec<Publication>,
-    pub native_categories: Vec<NativeCategoryOption>,
+    pub paper_sources: Vec<PaperSourceOption>,
 }
 
 #[derive(Clone, Debug)]
-pub struct NativeCategoryOption {
-    pub parameter: &'static str,
+pub struct PaperSourceOption {
     pub value: String,
     pub label: String,
-    pub repository: &'static str,
+    pub group: &'static str,
     pub selected: bool,
 }
 
