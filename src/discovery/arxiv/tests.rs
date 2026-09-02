@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Duration;
 
 #[test]
 fn validates_only_pilot_categories() {
@@ -84,5 +85,20 @@ fn builds_arxiv_work_with_matching_category_provenance() {
     assert_eq!(
         work.discovery_sources,
         vec![DiscoverySource::arxiv_category("q-bio.BM", "Biomolecules")]
+    );
+}
+
+#[test]
+fn computes_process_wide_api_delay() {
+    let now = Instant::now();
+
+    assert_eq!(remaining_api_delay(None, now), None);
+    assert_eq!(
+        remaining_api_delay(Some(now - Duration::from_secs(1)), now),
+        Some(Duration::from_secs(2))
+    );
+    assert_eq!(
+        remaining_api_delay(Some(now - Duration::from_secs(3)), now),
+        None
     );
 }

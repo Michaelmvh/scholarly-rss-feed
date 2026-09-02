@@ -10,6 +10,7 @@ use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 use std::time::Duration;
+use tokio::time::Instant;
 
 const RSS_BASE: &str = "https://rss.arxiv.org/rss";
 const API_URL: &str = "https://export.arxiv.org/api/query";
@@ -29,6 +30,8 @@ pub const CATEGORIES: &[(&str, &str)] = &[
 
 lazy_static! {
     static ref REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
+    static ref API_RATE_LIMITER: tokio::sync::Mutex<Option<Instant>> =
+        tokio::sync::Mutex::new(None);
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -163,9 +166,7 @@ async fn fetch_atom_pages(
     let mut works = Vec::new();
 
     loop {
-        if start > 0 {
-            tokio::time::sleep(API_DELAY).await;
-        }
+        wait_for_api_rate_limit().await;
         let start_value = start.to_string();
         let page_size = ATOM_PAGE_SIZE.to_string();
         let bytes = fetch_bytes(
@@ -194,6 +195,21 @@ async fn fetch_atom_pages(
         }
     }
     Ok(works)
+}
+
+async fn wait_for_api_rate_limit() {
+    let mut last_request = API_RATE_LIMITER.lock().await;
+    let now = Instant::now();
+    if let Some(delay) = remaining_api_delay(*last_request, now) {
+        tokio::time::sleep(delay).await;
+    }
+    *last_request = Some(Instant::now());
+}
+
+fn remaining_api_delay(last_request: Option<Instant>, now: Instant) -> Option<Duration> {
+    last_request
+        .and_then(|last_request| API_DELAY.checked_sub(now.duration_since(last_request)))
+        .filter(|delay| !delay.is_zero())
 }
 
 async fn fetch_bytes(request: reqwest::RequestBuilder, source: &str) -> Result<Vec<u8>, String> {
