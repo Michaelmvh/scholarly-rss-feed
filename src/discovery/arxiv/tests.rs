@@ -3,6 +3,13 @@ use super::*;
 #[test]
 fn validates_only_pilot_categories() {
     assert!(validate_categories(&["q-bio.BM".to_string(), "q-bio.QM".to_string()]).is_ok());
+    assert!(validate_categories(&[
+        "q-bio.GN".to_string(),
+        "q-bio.MN".to_string(),
+        "q-bio.PE".to_string(),
+        "physics.bio-ph".to_string(),
+    ])
+    .is_ok());
     assert_eq!(
         validate_categories(&["cs.LG".to_string()]).unwrap_err(),
         "Unknown arXiv category \"cs.LG\"."

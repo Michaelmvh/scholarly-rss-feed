@@ -56,6 +56,10 @@ lazy_static! {
 static CONFIG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 const DEFAULT_FROM_DAYS: u32 = 365;
+const DEFAULT_NATIVE_FROM_DAYS: u32 = 7;
+pub(crate) const BIORXIV_CATEGORY_PARAM: &str = "biorxiv_category";
+pub(crate) const ARXIV_CATEGORY_PARAM: &str = "arxiv_category";
+pub(crate) const NATIVE_DAYS_PARAM: &str = "native_days";
 const APPLE_TOUCH_ICON: &[u8] = include_bytes!("assets/apple-touch-icon.png");
 
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
@@ -141,6 +145,7 @@ type FeedCacheKey = (
     Vec<String>,
     Vec<String>,
     String,
+    String,
     Vec<String>,
 );
 type FeedBuild = Arc<tokio::sync::OnceCell<Result<GeneratedFeed, String>>>;
@@ -166,6 +171,8 @@ struct FeedRequest {
     source_ids: Vec<String>,
     /// Earliest publication date (YYYY-MM-DD).
     from: String,
+    /// Earliest native-source publication date (YYYY-MM-DD).
+    native_from: String,
     /// Sorted OpenAlex topic ids.
     topics: Vec<String>,
     /// Optional channel title carried alongside (not part of identity below).
@@ -184,6 +191,7 @@ impl FeedRequest {
             self.arxiv_categories.clone(),
             self.source_ids.clone(),
             self.from.clone(),
+            self.native_from.clone(),
             self.topics.clone(),
         )
     }
@@ -534,6 +542,8 @@ async fn resolve_feed_request(
     let adhoc_source_ids = collect_param(params, "source_id");
     let adhoc_issns = collect_param(params, "issn");
     let adhoc_journals = collect_param(params, "journal");
+    let adhoc_biorxiv_categories = collect_param(params, BIORXIV_CATEGORY_PARAM);
+    let adhoc_arxiv_categories = collect_param(params, ARXIV_CATEGORY_PARAM);
     let mut adhoc_topics = collect_param(params, "topic");
     adhoc_topics.extend(collect_param(params, "concept"));
     let adhoc_from = first_param(params, "from");
@@ -569,6 +579,11 @@ async fn resolve_feed_request(
                             )))
                         }
                     },
+                    None if !adhoc_biorxiv_categories.is_empty()
+                        || !adhoc_arxiv_categories.is_empty() =>
+                    {
+                        None
+                    }
                     None => return Ok(None),
                 }
             }
@@ -584,16 +599,48 @@ async fn resolve_feed_request(
     curated_sources.sort();
     curated_sources.dedup();
     curated::validate_sources(&curated_sources).map_err(ResolveFeedError::InvalidRequest)?;
-    let mut biorxiv_categories = feed.biorxiv_categories.clone();
+    let mut biorxiv_categories = feed
+        .biorxiv_categories
+        .iter()
+        .chain(&adhoc_biorxiv_categories)
+        .cloned()
+        .collect::<Vec<_>>();
     biorxiv_categories.sort();
     biorxiv_categories.dedup();
     discovery::biorxiv::validate_categories(&biorxiv_categories)
         .map_err(ResolveFeedError::InvalidRequest)?;
-    let mut arxiv_categories = feed.arxiv_categories.clone();
+    let mut arxiv_categories = feed
+        .arxiv_categories
+        .iter()
+        .chain(&adhoc_arxiv_categories)
+        .cloned()
+        .collect::<Vec<_>>();
     arxiv_categories.sort();
     arxiv_categories.dedup();
     discovery::arxiv::validate_categories(&arxiv_categories)
         .map_err(ResolveFeedError::InvalidRequest)?;
+    let has_adhoc_native =
+        !adhoc_biorxiv_categories.is_empty() || !adhoc_arxiv_categories.is_empty();
+    let native_from = if has_adhoc_native {
+        let days = first_param(params, NATIVE_DAYS_PARAM)
+            .map(|value| {
+                value.parse::<u32>().map_err(|_| {
+                    ResolveFeedError::InvalidRequest(format!(
+                        "\"{NATIVE_DAYS_PARAM}\" must be a number from 1 through 30."
+                    ))
+                })
+            })
+            .transpose()?
+            .unwrap_or(DEFAULT_NATIVE_FROM_DAYS);
+        if !(1..=30).contains(&days) {
+            return Err(ResolveFeedError::InvalidRequest(format!(
+                "\"{NATIVE_DAYS_PARAM}\" must be a number from 1 through 30."
+            )));
+        }
+        default_from_date(Some(days))
+    } else {
+        from.clone()
+    };
     let mut tracked_author_names = feed
         .people
         .iter()
@@ -656,6 +703,7 @@ async fn resolve_feed_request(
             arxiv_categories,
             source_ids: Vec::new(),
             from,
+            native_from,
             topics: Vec::new(),
             title: feed.title.clone(),
         }));
@@ -763,6 +811,7 @@ async fn resolve_feed_request(
         arxiv_categories,
         source_ids,
         from,
+        native_from,
         topics,
         title: feed.title.clone(),
     }))
@@ -987,6 +1036,31 @@ async fn build_feed(request: &FeedRequest) -> Result<GeneratedFeed, String> {
             title,
             description,
             publications,
+            native_categories: discovery::biorxiv::CATEGORIES
+                .iter()
+                .map(|(value, label)| reader::NativeCategoryOption {
+                    parameter: BIORXIV_CATEGORY_PARAM,
+                    value: (*value).to_string(),
+                    label: (*label).to_string(),
+                    repository: "bioRxiv",
+                    selected: request
+                        .biorxiv_categories
+                        .iter()
+                        .any(|category| category == value),
+                })
+                .chain(discovery::arxiv::CATEGORIES.iter().map(|(value, label)| {
+                    reader::NativeCategoryOption {
+                        parameter: ARXIV_CATEGORY_PARAM,
+                        value: (*value).to_string(),
+                        label: format!("{label} ({value})"),
+                        repository: "arXiv",
+                        selected: request
+                            .arxiv_categories
+                            .iter()
+                            .any(|category| category == value),
+                    }
+                }))
+                .collect(),
         },
     })
 }
@@ -1035,8 +1109,16 @@ async fn fetch_works(request: &FeedRequest) -> Result<Vec<Work>, String> {
     let (provider_works, curated_works, biorxiv_works, arxiv_works) = tokio::join!(
         fetch_provider_works(request),
         curated::fetch_sources(&CLIENT, &request.curated_sources, &request.from),
-        discovery::biorxiv::fetch_categories(&CLIENT, &request.biorxiv_categories, &request.from,),
-        discovery::arxiv::fetch_categories(&CLIENT, &request.arxiv_categories, &request.from),
+        discovery::biorxiv::fetch_categories(
+            &CLIENT,
+            &request.biorxiv_categories,
+            &request.native_from,
+        ),
+        discovery::arxiv::fetch_categories(
+            &CLIENT,
+            &request.arxiv_categories,
+            &request.native_from,
+        ),
     );
     let mut provider_works = provider_works?;
     for work in &mut provider_works {
@@ -1177,6 +1259,17 @@ async fn fetch_works_for_filter(filter: Option<String>) -> Result<Vec<Work>, Str
 fn work_to_item(work: &Work) -> rss::Item {
     let link = work.best_link();
     let curated_sources = work.curated_discovery_sources().collect::<Vec<_>>();
+    let native_sources = work
+        .discovery_sources
+        .iter()
+        .filter(|source| {
+            matches!(
+                source.kind,
+                crate::provenance::DiscoverySourceKind::Biorxiv
+                    | crate::provenance::DiscoverySourceKind::Arxiv
+            )
+        })
+        .collect::<Vec<_>>();
 
     let guid = link
         .clone()
@@ -1227,6 +1320,22 @@ fn work_to_item(work: &Work) -> rss::Item {
             .collect::<Vec<_>>()
             .join(", ");
         let provenance = format!("Curated by: {sources}");
+        description = Some(match description {
+            Some(current) => format!("{current}\n{provenance}"),
+            None => provenance,
+        });
+    }
+
+    if !native_sources.is_empty() {
+        let sources = native_sources
+            .iter()
+            .map(|source| match &source.url {
+                Some(url) => format!("{} ({url})", source.label),
+                None => source.label.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let provenance = format!("Preprint source: {sources}");
         description = Some(match description {
             Some(current) => format!("{current}\n{provenance}"),
             None => provenance,
@@ -1904,6 +2013,63 @@ arxiv_categories = ["q-bio.BM"]
             .unwrap();
 
         assert_eq!(request.from, default_from_date(Some(7)));
+    }
+
+    #[tokio::test]
+    async fn optional_native_categories_extend_the_default_feed() {
+        let config: Config = toml::from_str(include_str!("../feeds.toml")).unwrap();
+        let params = vec![
+            (
+                BIORXIV_CATEGORY_PARAM.to_string(),
+                "synthetic_biology".to_string(),
+            ),
+            (ARXIV_CATEGORY_PARAM.to_string(), "q-bio.GN".to_string()),
+            (NATIVE_DAYS_PARAM.to_string(), "14".to_string()),
+        ];
+
+        let request = resolve_feed_request(&params, &config, Provider::OpenAlex)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(!request.author_ids.is_empty());
+        assert_eq!(request.biorxiv_categories, vec!["synthetic_biology"]);
+        assert_eq!(request.arxiv_categories, vec!["q-bio.GN"]);
+        assert_eq!(request.native_from, default_from_date(Some(14)));
+        assert_eq!(request.from, default_from_date(Some(365)));
+    }
+
+    #[tokio::test]
+    async fn rejects_excessive_native_query_windows() {
+        let config: Config = toml::from_str(include_str!("../feeds.toml")).unwrap();
+        let params = vec![
+            (ARXIV_CATEGORY_PARAM.to_string(), "q-bio.BM".to_string()),
+            (NATIVE_DAYS_PARAM.to_string(), "365".to_string()),
+        ];
+
+        let error = resolve_feed_request(&params, &config, Provider::OpenAlex)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ResolveFeedError::InvalidRequest(message)
+                if message.contains("must be a number from 1 through 30")
+        ));
+    }
+
+    #[test]
+    fn rss_items_identify_native_preprint_categories() {
+        let mut work = work(Some("arxiv:2608.30337"), Some("2026-08-31"));
+        work.add_discovery_source(DiscoverySource::arxiv_category("q-bio.BM", "Biomolecules"));
+
+        let item = work_to_item(&work);
+
+        assert!(item.description.as_deref().is_some_and(|description| {
+            description.contains(
+                "Preprint source: arXiv: Biomolecules (https://arxiv.org/list/q-bio.BM/recent)",
+            )
+        }));
     }
 
     #[test]

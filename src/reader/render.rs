@@ -3,6 +3,8 @@ use super::filters::{
     PERIOD_PARAM, SOURCE_PARAM,
 };
 use super::{Author, Feed, Publication};
+use crate::provenance::{DiscoverySource, DiscoverySourceKind};
+use crate::{ARXIV_CATEGORY_PARAM, BIORXIV_CATEGORY_PARAM};
 
 pub const FAVICON: &str = include_str!("../assets/apple-touch-icon.svg");
 pub const READER_CSS: &str = include_str!("../assets/reader.css");
@@ -28,7 +30,7 @@ pub fn render_feed(feed: &Feed, params: &[(String, String)]) -> String {
     } else {
         format!("{item_count} publications")
     };
-    let filter_form = render_filter_form(params, &filters, &options);
+    let filter_form = render_filter_form(params, &filters, &options, &feed.native_categories);
 
     let mut articles = String::new();
     for publication in publications {
@@ -54,6 +56,7 @@ pub fn render_feed(feed: &Feed, params: &[(String, String)]) -> String {
 "#
         ));
     }
+
     if articles.is_empty() {
         articles.push_str(r#"<li class="empty">No recent publications found.</li>"#);
     }
@@ -78,8 +81,8 @@ pub fn render_feed(feed: &Feed, params: &[(String, String)]) -> String {
   <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
   <link rel="alternate" type="application/rss+xml" title="{title}" href="{rss_url}">
   <title>{title}</title>
-  <link rel="stylesheet" href="/reader.css?v=4">
-  <script src="/reader.js?v=3" defer></script>
+  <link rel="stylesheet" href="/reader.css?v=5">
+  <script src="/reader.js?v=4" defer></script>
 </head>
 <body>
   <main>
@@ -240,26 +243,46 @@ fn render_provenance(publication: &Publication) -> String {
         .iter()
         .filter(|source| source.is_curated_collection())
         .collect::<Vec<_>>();
-    if curated_sources.is_empty() {
-        return String::new();
-    }
-
-    let sources = curated_sources
+    let native_sources = publication
+        .discovery_sources
         .iter()
-        .map(|source| {
-            source.url.as_deref().map_or_else(
-                || escape_html(&source.label),
-                |url| {
-                    format!(
-                        r#"<a href="{}" rel="external">{}</a>"#,
-                        escape_html(url),
-                        escape_html(&source.label)
-                    )
-                },
+        .filter(|source| {
+            matches!(
+                source.kind,
+                DiscoverySourceKind::Biorxiv | DiscoverySourceKind::Arxiv
             )
         })
-        .collect::<Vec<_>>()
-        .join(", ");
+        .collect::<Vec<_>>();
+    let render_sources = |sources: &[&DiscoverySource]| {
+        sources
+            .iter()
+            .map(|source| {
+                source.url.as_deref().map_or_else(
+                    || escape_html(&source.label),
+                    |url| {
+                        format!(
+                            r#"<a href="{}" rel="external">{}</a>"#,
+                            escape_html(url),
+                            escape_html(&source.label)
+                        )
+                    },
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut provenance = String::new();
+    if !native_sources.is_empty() {
+        provenance.push_str(&format!(
+            r#"<p class="provenance">Preprint source: {}</p>"#,
+            render_sources(&native_sources)
+        ));
+    }
+    if curated_sources.is_empty() {
+        return provenance;
+    }
+
+    let sources = render_sources(&curated_sources);
     let categories = if publication.curated_categories.is_empty() {
         String::new()
     } else {
@@ -269,17 +292,27 @@ fn render_provenance(publication: &Publication) -> String {
         )
     };
 
-    format!(r#"<p class="provenance">Curated by {sources}{categories}</p>"#)
+    provenance.push_str(&format!(
+        r#"<p class="provenance">Curated by {sources}{categories}</p>"#
+    ));
+    provenance
 }
 
 fn render_filter_form(
     params: &[(String, String)],
     filters: &ViewFilters,
     options: &FilterOptions,
+    native_categories: &[super::NativeCategoryOption],
 ) -> String {
     let hidden_params = params
         .iter()
-        .filter(|(name, _)| name != "rss" && name != "article" && !is_view_param(name))
+        .filter(|(name, _)| {
+            name != "rss"
+                && name != "article"
+                && name != BIORXIV_CATEGORY_PARAM
+                && name != ARXIV_CATEGORY_PARAM
+                && !is_view_param(name)
+        })
         .map(|(name, value)| {
             format!(
                 r#"<input type="hidden" name="{}" value="{}">"#,
@@ -305,6 +338,7 @@ fn render_filter_form(
     .collect::<String>();
     let author_filter = render_author_filter(&filters.authors, &options.authors);
     let source_filter = render_source_filter(filters.source.as_deref(), options);
+    let native_filter = render_native_category_filter(native_categories);
     let (filter_action_class, clear_link) = if filters == &ViewFilters::default() {
         ("filter-actions no-clear", String::new())
     } else {
@@ -324,9 +358,67 @@ fn render_filter_form(
           <label class="filter-select">Publication date<select name="{PERIOD_PARAM}" data-auto-submit>{periods}</select></label>
           {author_filter}
           {source_filter}
+          {native_filter}
         </div>
         <div class="{filter_action_class}"><button class="apply-filters" type="submit">Apply filters</button>{clear_link}</div>
       </form>"#
+    )
+}
+
+fn render_native_category_filter(options: &[super::NativeCategoryOption]) -> String {
+    if options.is_empty() {
+        return String::new();
+    }
+    let selected = options.iter().filter(|option| option.selected).count();
+    let summary = match selected {
+        0 => "None selected".to_string(),
+        1 => options
+            .iter()
+            .find(|option| option.selected)
+            .map(|option| option.label.clone())
+            .unwrap_or_else(|| "1 selected".to_string()),
+        count => format!("{count} selected"),
+    };
+    let mut repositories = options
+        .iter()
+        .map(|option| option.repository)
+        .collect::<Vec<_>>();
+    repositories.sort_unstable();
+    repositories.dedup();
+    let groups = repositories
+        .into_iter()
+        .map(|repository| {
+            let checkboxes = options
+                .iter()
+                .filter(|option| option.repository == repository)
+                .map(|option| {
+                    let checked = if option.selected { " checked" } else { "" };
+                    format!(
+                        r#"<label class="filter-checkbox"><input type="checkbox" name="{}" value="{}" data-label="{}"{checked}><span>{}</span></label>"#,
+                        escape_html(option.parameter),
+                        escape_html(&option.value),
+                        escape_html(&option.label),
+                        escape_html(&option.label)
+                    )
+                })
+                .collect::<String>();
+            format!(
+                r#"<div class="filter-option-group"><strong>{}</strong>{checkboxes}</div>"#,
+                escape_html(repository)
+            )
+        })
+        .collect::<String>();
+
+    format!(
+        r#"<details class="filter-multiselect" data-multiselect>
+            <summary><span class="filter-label">Preprint categories</span><span class="filter-value" data-selection-summary data-empty-label="None selected">{}</span></summary>
+            <div class="filter-options">
+              <label class="filter-checkbox filter-select-all" hidden><input type="checkbox" data-select-all{}><span>No preprints</span></label>
+              <div class="filter-option-list">{groups}</div>
+            </div>
+          </details>"#,
+        escape_html(&summary),
+        if selected == 0 { " checked" } else { "" }
     )
 }
 
@@ -536,6 +628,7 @@ mod tests {
         Feed {
             title: "Research & <Development>".to_string(),
             description: "Recent \"research\"".to_string(),
+            native_categories: Vec::new(),
             publications: vec![Publication {
                 id: Some("https://openalex.org/W1".to_string()),
                 title: "<script>alert('title')</script>".to_string(),
@@ -576,15 +669,67 @@ mod tests {
     }
 
     #[test]
+    fn renders_optional_native_categories_unselected() {
+        let mut feed = sample_feed();
+        feed.native_categories = vec![
+            super::super::NativeCategoryOption {
+                parameter: BIORXIV_CATEGORY_PARAM,
+                value: "synthetic_biology".to_string(),
+                label: "Synthetic Biology".to_string(),
+                repository: "bioRxiv",
+                selected: false,
+            },
+            super::super::NativeCategoryOption {
+                parameter: ARXIV_CATEGORY_PARAM,
+                value: "q-bio.BM".to_string(),
+                label: "Biomolecules (q-bio.BM)".to_string(),
+                repository: "arXiv",
+                selected: false,
+            },
+        ];
+
+        let html = render_feed(&feed, &[]);
+
+        assert!(html.contains("Preprint categories"));
+        assert!(html.contains(r#"name="biorxiv_category" value="synthetic_biology""#));
+        assert!(html.contains(r#"name="arxiv_category" value="q-bio.BM""#));
+        assert!(html.contains("None selected"));
+        assert!(
+            !html.contains(r#"value="synthetic_biology" data-label="Synthetic Biology" checked"#)
+        );
+    }
+
+    #[test]
+    fn renders_native_preprint_provenance() {
+        let mut feed = sample_feed();
+        feed.publications[0]
+            .discovery_sources
+            .push(DiscoverySource::arxiv_category("q-bio.BM", "Biomolecules"));
+
+        let html = render_feed(&feed, &[]);
+
+        assert!(html.contains("Preprint source:"));
+        assert!(html.contains("arXiv: Biomolecules"));
+        assert!(html.contains("https://arxiv.org/list/q-bio.BM/recent"));
+    }
+
+    #[test]
     fn raw_feed_url_preserves_existing_parameters() {
         let params = vec![
             ("feed".to_string(), "my field".to_string()),
             ("author_id".to_string(), "A1".to_string()),
+            (
+                BIORXIV_CATEGORY_PARAM.to_string(),
+                "synthetic_biology".to_string(),
+            ),
             (PERIOD_PARAM.to_string(), "90d".to_string()),
             (AUTHOR_PARAM.to_string(), "ada-lovelace".to_string()),
         ];
 
-        assert_eq!(raw_feed_url(&params), "?feed=my+field&author_id=A1&rss");
+        assert_eq!(
+            raw_feed_url(&params),
+            "?feed=my+field&author_id=A1&biorxiv_category=synthetic_biology&rss"
+        );
         assert_eq!(raw_feed_url(&[]), "?rss");
     }
 
@@ -613,7 +758,7 @@ mod tests {
         ));
         assert!(html.contains(r#"<option value="curated-source" selected>Curated Source</option>"#));
         assert!(html.contains("?view_author=ada+lovelace&amp;view_source=curated-source"));
-        assert!(html.contains(r#"<script src="/reader.js?v=3" defer></script>"#));
+        assert!(html.contains(r#"<script src="/reader.js?v=4" defer></script>"#));
         assert!(html.contains(
             r#"<label class="filter-checkbox filter-select-all" hidden><input type="checkbox" data-select-all><span>All tracked authors</span>"#
         ));

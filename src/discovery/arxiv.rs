@@ -18,8 +18,12 @@ const OVERLAP_DAYS: u32 = 2;
 const ATOM_PAGE_SIZE: usize = 2_000;
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const API_DELAY: Duration = Duration::from_secs(3);
-const ALLOWED_CATEGORIES: &[(&str, &str)] = &[
+pub const CATEGORIES: &[(&str, &str)] = &[
+    ("physics.bio-ph", "Biological Physics"),
     ("q-bio.BM", "Biomolecules"),
+    ("q-bio.GN", "Genomics"),
+    ("q-bio.MN", "Molecular Networks"),
+    ("q-bio.PE", "Populations and Evolution"),
     ("q-bio.QM", "Quantitative Methods"),
 ];
 
@@ -467,7 +471,7 @@ fn normalize_doi(doi: &str) -> String {
 }
 
 fn category_label(category: &str) -> Option<&'static str> {
-    ALLOWED_CATEGORIES
+    CATEGORIES
         .iter()
         .find_map(|(key, label)| (*key == category).then_some(*label))
 }

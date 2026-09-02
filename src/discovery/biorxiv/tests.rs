@@ -30,6 +30,14 @@ fn validates_only_pilot_categories() {
         "bioinformatics".to_string()
     ])
     .is_ok());
+    assert!(validate_categories(&[
+        "bioengineering".to_string(),
+        "systems_biology".to_string(),
+        "genomics".to_string(),
+        "biochemistry".to_string(),
+        "molecular_biology".to_string(),
+    ])
+    .is_ok());
     assert_eq!(
         validate_categories(&["neuroscience".to_string()]).unwrap_err(),
         "Unknown bioRxiv category \"neuroscience\"."

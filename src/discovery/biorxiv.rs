@@ -13,9 +13,14 @@ const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 const OVERLAP_DAYS: u32 = 2;
 const PAGE_SIZE: usize = 30;
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-const ALLOWED_CATEGORIES: &[(&str, &str)] = &[
+pub const CATEGORIES: &[(&str, &str)] = &[
+    ("biochemistry", "Biochemistry"),
+    ("bioengineering", "Bioengineering"),
     ("bioinformatics", "Bioinformatics"),
+    ("genomics", "Genomics"),
+    ("molecular_biology", "Molecular Biology"),
     ("synthetic_biology", "Synthetic Biology"),
+    ("systems_biology", "Systems Biology"),
 ];
 
 lazy_static! {
@@ -304,7 +309,7 @@ fn normalize_doi(value: &str) -> Option<String> {
 }
 
 fn category_label(category: &str) -> Option<&'static str> {
-    ALLOWED_CATEGORIES
+    CATEGORIES
         .iter()
         .find_map(|(key, label)| (*key == category).then_some(*label))
 }
