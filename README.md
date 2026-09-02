@@ -575,9 +575,9 @@ protect the public endpoint:
    ```
 
 4. Set **Cache eligibility** to **Eligible for cache**.
-5. Set an **Edge TTL** of two hours. The application sends
-   `Cache-Control: public, max-age=300, s-maxage=7200, stale-while-revalidate=86400` so browsers
-   may cache for five minutes and shared caches may retain a response for two hours.
+5. Set an **Edge TTL** of two hours. Dynamic responses tell browsers to revalidate immediately,
+   while `Cloudflare-CDN-Cache-Control` allows Cloudflare to retain a response for two hours and
+   serve stale content during background revalidation.
 6. Keep query strings in the cache key so different named feeds remain separate.
 
 Cloudflare's first request for a URL is a cache miss and reaches the NAS; subsequent requests

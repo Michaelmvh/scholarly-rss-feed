@@ -57,6 +57,8 @@ static CONFIG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 const DEFAULT_FROM_DAYS: u32 = 365;
 const DEFAULT_NATIVE_FROM_DAYS: u32 = 7;
+const DYNAMIC_BROWSER_CACHE_CONTROL: &str = "public, max-age=0, must-revalidate";
+const DYNAMIC_CDN_CACHE_CONTROL: &str = "public, max-age=7200, stale-while-revalidate=86400";
 pub(crate) const BIORXIV_CATEGORY_PARAM: &str = "biorxiv_category";
 pub(crate) const ARXIV_CATEGORY_PARAM: &str = "arxiv_category";
 pub(crate) const NATIVE_DAYS_PARAM: &str = "native_days";
@@ -509,10 +511,8 @@ async fn serve_feed(request: Request<Incoming>) -> Result<Response<Full<Bytes>>,
     Response::builder()
         .header("Content-Type", content_type)
         .header("Access-Control-Allow-Origin", "*")
-        .header(
-            "Cache-Control",
-            "public, max-age=300, s-maxage=7200, stale-while-revalidate=86400",
-        )
+        .header("Cache-Control", DYNAMIC_BROWSER_CACHE_CONTROL)
+        .header("Cloudflare-CDN-Cache-Control", DYNAMIC_CDN_CACHE_CONTROL)
         .status(status)
         .body(Full::new(body))
 }
