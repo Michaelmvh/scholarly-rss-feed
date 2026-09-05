@@ -95,6 +95,14 @@ name = "Nicholas F. Polizzi"
 openalex_id = "A5058410619"
 
 [[feeds.bioml.people]]
+name = "Sudarshan Pinglay"
+openalex_id = "A5064029491"
+
+[[feeds.bioml.people]]
+name = "Jay Shendure"
+openalex_id = "A5083897996"
+
+[[feeds.bioml.people]]
 name = "Jure Leskovec"
 openalex_id = "A5091272738"
 
