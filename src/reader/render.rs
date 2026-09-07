@@ -136,7 +136,7 @@ pub fn render_article(
         .as_deref()
         .map(|link| {
             format!(
-                r#"<a class="primary-action" href="{}" rel="external">Read full article <span aria-hidden="true">↗</span></a>"#,
+                r#"<a class="primary-action" href="{}" target="_blank" rel="external noopener">Read full article <span aria-hidden="true">↗</span></a>"#,
                 escape_html(link)
             )
         })
@@ -146,7 +146,7 @@ pub fn render_article(
         .as_deref()
         .map(|link| {
             format!(
-                r#"<a class="secondary-action" href="{}" rel="external">Open PDF <span aria-hidden="true">↗</span></a>"#,
+                r#"<a class="secondary-action" href="{}" target="_blank" rel="external noopener">Open PDF <span aria-hidden="true">↗</span></a>"#,
                 escape_html(link)
             )
         })
@@ -848,7 +848,7 @@ mod tests {
 
         assert!(html.contains("https://example.com/?a=1&amp;b=2"));
         assert!(html.contains(
-            r#"<a class="secondary-action" href="https://example.com/article.pdf?a=1&amp;b=2" rel="external">Open PDF"#
+            r#"<a class="secondary-action" href="https://example.com/article.pdf?a=1&amp;b=2" target="_blank" rel="external noopener">Open PDF"#
         ));
         assert!(html.contains("&lt;strong&gt;abstract&lt;/strong&gt;"));
         assert!(html.contains(r#"<link rel="icon" href="/favicon.svg" type="image/svg+xml">"#));
@@ -861,6 +861,30 @@ mod tests {
             r#"<strong class="notable-author">Ada Lovelace</strong>, <strong class="notable-author">Grace Hopper</strong>, Alan Turing"#
         ));
         assert!(html.contains(r#"class="back" href="/?feed=myfield&amp;view_period=90d""#));
+    }
+
+    #[test]
+    fn article_actions_open_new_tabs_without_changing_internal_navigation() {
+        let html = render_article(&sample_feed(), "https://openalex.org/W1", &[]).unwrap();
+        let document = Html::parse_document(&html);
+        let external_actions = Selector::parse("a.primary-action, a.secondary-action").unwrap();
+        let links = document.select(&external_actions).collect::<Vec<_>>();
+
+        assert_eq!(links.len(), 2);
+        for link in links {
+            assert_eq!(link.value().attr("target"), Some("_blank"));
+            let rel = link.value().attr("rel").unwrap();
+            assert!(rel.split_whitespace().any(|value| value == "external"));
+            assert!(rel.split_whitespace().any(|value| value == "noopener"));
+        }
+
+        let internal_links =
+            Selector::parse("a.back, .actions a:not(.primary-action):not(.secondary-action)").unwrap();
+        let links = document.select(&internal_links).collect::<Vec<_>>();
+        assert_eq!(links.len(), 2);
+        for link in links {
+            assert_eq!(link.value().attr("target"), None);
+        }
     }
 
     #[test]
