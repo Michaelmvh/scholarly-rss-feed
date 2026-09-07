@@ -2159,6 +2159,36 @@ mod tests {
     }
 
     #[test]
+    fn abstract_text_is_normalized_in_rss_and_article_output() {
+        let work: Work = serde_json::from_value(serde_json::json!({
+            "id": "https://openalex.org/W7169812613",
+            "abstract_inverted_index": {
+                "Abstract": [0],
+                "The": [1],
+                "rapid": [2],
+                "growth": [3],
+                "of": [4],
+                "biotechnology": [5]
+            }
+        }))
+        .unwrap();
+        let expected = "The rapid growth of biotechnology";
+        assert_eq!(work_to_item(&work).content.as_deref(), Some(expected));
+
+        let mut feed = empty_generated_feed().reader;
+        feed.publications.push(work_to_publication(&work));
+        let html = reader::render_article(&feed, "https://openalex.org/W7169812613", &[])
+            .unwrap();
+        assert!(html.contains("<h2 id=\"abstract-heading\">Abstract</h2>"));
+        assert!(html.contains(&format!("<p>{expected}</p>")));
+        assert!(!html.contains("<p>Abstract The"));
+        assert_eq!(
+            work.abstract_inverted_index.as_ref().unwrap().get("Abstract"),
+            Some(&vec![0])
+        );
+    }
+
+    #[test]
     fn item_uses_dublin_core_creators_and_omits_unknown_length_enclosure() {
         let work: Work = serde_json::from_value(serde_json::json!({
             "id": "https://openalex.org/W1",

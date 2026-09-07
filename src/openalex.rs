@@ -182,10 +182,10 @@ impl Work {
             })
     }
 
-    /// Reconstruct the abstract text from OpenAlex's inverted index.
+    /// Return the abstract text with redundant source section labels removed.
     pub fn abstract_text(&self) -> Option<String> {
-        if self.abstract_text_override.is_some() {
-            return self.abstract_text_override.clone();
+        if let Some(text) = &self.abstract_text_override {
+            return normalize_abstract_text(text, false);
         }
         let index = self.abstract_inverted_index.as_ref()?;
         if index.is_empty() {
@@ -203,12 +203,52 @@ impl Work {
             .map(|(_, word)| word)
             .collect::<Vec<_>>()
             .join(" ");
-        if text.is_empty() {
-            None
-        } else {
-            Some(text)
-        }
+        normalize_abstract_text(&text, true)
     }
+}
+
+fn normalize_abstract_text(text: &str, from_inverted_index: bool) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let Some(label) = text.get(..8).filter(|label| label.eq_ignore_ascii_case("abstract"))
+    else {
+        return Some(text.to_string());
+    };
+    let remainder = &text[label.len()..];
+    let body = remainder.trim_start();
+    let separate_line = remainder
+        .chars()
+        .take_while(|character| character.is_whitespace())
+        .any(|character| matches!(character, '\r' | '\n'));
+    let delimited_body = body.chars().next().and_then(|separator| {
+        let rest = &body[separator.len_utf8()..];
+        match separator {
+            ':' | '\u{2013}' | '\u{2014}' => Some(rest.trim_start()),
+            '.' | '-' if rest.starts_with(char::is_whitespace) => Some(rest.trim_start()),
+            _ => None,
+        }
+    });
+
+    // OpenAlex flattens headings into word positions. Only infer a bare label
+    // before clear sentence openings, not arbitrary capitals such as "Abstract DNA".
+    let flattened_label = from_inverted_index
+        && remainder.starts_with(char::is_whitespace)
+        && matches!(
+            body.split_whitespace().next(),
+            Some("The" | "This" | "We" | "Our" | "Here")
+        );
+    let cleaned = if let Some(body) = delimited_body {
+        body
+    } else if separate_line || flattened_label {
+        body
+    } else {
+        text
+    };
+
+    // Preserve ambiguous label-only records rather than deleting their entire content.
+    Some(if cleaned.is_empty() { text } else { cleaned }.to_string())
 }
 
 /// Normalize any OpenAlex id or url (author `A…`, source `S…`, topic `T…`) to its bare
@@ -226,6 +266,99 @@ pub fn normalize_id(raw: &str) -> String {
 mod tests {
     use super::*;
     use crate::provenance::{DiscoverySource, DiscoverySourceKind};
+
+    #[test]
+    fn abstract_text_removes_explicit_labels_from_both_sources() {
+        for text in [
+            "Abstract: The study.",
+            " ABSTRACT : The study. ",
+            "abstract:The study.",
+            "Abstract. The study.",
+            "Abstract - The study.",
+            "Abstract\u{2014}The study.",
+            "Abstract \u{2013} The study.",
+            "Abstract\nThe study.",
+            "Abstract\r\nThe study.",
+        ] {
+            for from_inverted_index in [false, true] {
+                assert_eq!(
+                    normalize_abstract_text(text, from_inverted_index).as_deref(),
+                    Some("The study."),
+                    "{text:?}, from_inverted_index={from_inverted_index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn abstract_text_removes_only_clear_flattened_openalex_labels() {
+        for opening in ["The", "This", "We", "Our", "Here"] {
+            let mut work: Work = serde_json::from_value(serde_json::json!({
+                "abstract_inverted_index": {
+                    "Abstract": [0],
+                    opening: [1],
+                    "study.": [2]
+                }
+            }))
+            .unwrap();
+            assert_eq!(work.abstract_text(), Some(format!("{opening} study.")));
+            work.abstract_text_override = Some(format!("Abstract {opening} study."));
+            assert_eq!(
+                work.abstract_text(),
+                Some(format!("Abstract {opening} study."))
+            );
+        }
+        assert_eq!(
+            normalize_abstract_text("ABSTRACT This study.", true).as_deref(),
+            Some("This study.")
+        );
+    }
+
+    #[test]
+    fn abstract_text_preserves_ambiguous_openings_and_body_content() {
+        for text in [
+            "Abstract representations are useful.",
+            "Abstract DNA models are useful.",
+            "Abstract Sperm subpopulations are distinct.",
+            "Abstract-based models are useful.",
+            "Abstract.js is a library.",
+            "Abstractness is measured.",
+            "Abstract",
+            "Abstract:",
+            "Background: The study. Abstract appears later.",
+            "The study discusses Abstract representations.",
+            "\u{7814}\u{7a76} describes a study.",
+        ] {
+            for from_inverted_index in [false, true] {
+                assert_eq!(
+                    normalize_abstract_text(text, from_inverted_index).as_deref(),
+                    Some(text),
+                    "{text:?}, from_inverted_index={from_inverted_index}"
+                );
+            }
+        }
+        assert_eq!(
+            normalize_abstract_text("Abstract: Background: A study.\nMethods: Details.", false)
+                .as_deref(),
+            Some("Background: A study.\nMethods: Details.")
+        );
+    }
+
+    #[test]
+    fn abstract_text_handles_missing_empty_and_override_values() {
+        let mut work: Work = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(work.abstract_text(), None);
+        work.abstract_inverted_index = Some(HashMap::new());
+        assert_eq!(work.abstract_text(), None);
+        work.abstract_text_override = Some(" \n ".to_string());
+        assert_eq!(work.abstract_text(), None);
+        work.abstract_text_override = Some(" Abstract: A study. ".to_string());
+        assert_eq!(work.abstract_text().as_deref(), Some("A study."));
+        assert_eq!(
+            work.abstract_text_override.as_deref(),
+            Some(" Abstract: A study. ")
+        );
+    }
 
     #[test]
     fn serializes_structured_provenance() {
