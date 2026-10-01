@@ -106,6 +106,14 @@ openalex_id = "A5083897996"
 name = "Jure Leskovec"
 openalex_id = "A5091272738"
 
+[[feeds.bioml.people]]
+name = "Brian Hie"
+openalex_id = "A5021962955"
+
+[[feeds.bioml.people]]
+name = "Charlotte Mary Deane"
+openalex_id = "A5015572211"
+
 [feeds.native-preprint-pilot]
 title = "Native Preprint Pilot"
 from_days = 7
