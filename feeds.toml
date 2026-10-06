@@ -111,6 +111,10 @@ name = "Brian Hie"
 openalex_id = "A5021962955"
 
 [[feeds.bioml.people]]
+name = "Jorge Marchand"
+openalex_id = "a5059494605"
+
+[[feeds.bioml.people]]
 name = "Charlotte Mary Deane"
 openalex_id = "A5015572211"
 
