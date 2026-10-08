@@ -17,7 +17,10 @@ use crate::openalex::{
     API_BASE,
 };
 use crate::provenance::DiscoverySource;
-use crate::works::{mark_authors_by_name, merge_works, normalize_author_name};
+use crate::works::{
+    mark_authors_by_name, mark_feed_authors, merge_works, normalize_author_name, resolve_author_match,
+    resolve_openalex_author_match,
+};
 use chrono::{Duration, NaiveDate, NaiveTime, Utc};
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
@@ -184,6 +187,7 @@ struct FeedCacheKey {
     author_ids: Vec<String>,
     google_scholar_authors: Vec<String>,
     tracked_author_names: Vec<String>,
+    people: Vec<config::PersonConfig>,
     curated_sources: Vec<String>,
     biorxiv_categories: Vec<String>,
     arxiv_categories: Vec<String>,
@@ -208,6 +212,8 @@ struct FeedRequest {
     google_scholar_authors: Vec<String>,
     /// Canonical author names and explicit aliases used for provider-neutral highlighting.
     tracked_author_names: Vec<String>,
+    /// Configured identities and reader defaults, including non-optional authors.
+    people: Vec<config::PersonConfig>,
     /// Curated paper collections included in the feed.
     curated_sources: Vec<String>,
     /// Native bioRxiv categories included in the feed.
@@ -240,6 +246,7 @@ impl FeedRequest {
             author_ids: self.author_ids.clone(),
             google_scholar_authors: self.google_scholar_authors.clone(),
             tracked_author_names: self.tracked_author_names.clone(),
+            people: self.people.clone(),
             curated_sources: self.curated_sources.clone(),
             biorxiv_categories: self.biorxiv_categories.clone(),
             arxiv_categories: self.arxiv_categories.clone(),
@@ -916,6 +923,7 @@ async fn resolve_feed_request(
         .collect::<Vec<_>>();
     tracked_author_names.sort();
     tracked_author_names.dedup();
+    let people = feed.people.clone();
 
     if provider == Provider::GoogleScholar {
         let mut google_scholar_authors = include_core
@@ -959,6 +967,7 @@ async fn resolve_feed_request(
             author_ids: Vec::new(),
             google_scholar_authors,
             tracked_author_names,
+            people,
             curated_sources,
             biorxiv_categories,
             arxiv_categories,
@@ -1075,6 +1084,7 @@ async fn resolve_feed_request(
         author_ids,
         google_scholar_authors: Vec::new(),
         tracked_author_names,
+        people,
         curated_sources,
         biorxiv_categories,
         arxiv_categories,
@@ -1365,7 +1375,10 @@ async fn build_feed(request: &FeedRequest) -> Result<GeneratedFeed, String> {
     channel.set_pub_date(now.clone());
     channel.set_last_build_date(now);
 
-    let publications = works.iter().map(work_to_publication).collect();
+    let publications = works
+        .iter()
+        .map(|work| work_to_publication(work, &request.people))
+        .collect();
 
     let mut paper_sources = Vec::new();
     if request.core_available {
@@ -1480,19 +1493,38 @@ async fn fetch_works(request: &FeedRequest) -> Result<Vec<Work>, String> {
         work.add_discovery_source(request.provider.discovery_source());
     }
     let mut curated_works = curated_works?;
-    let biorxiv_works = biorxiv_works?;
-    let arxiv_works = arxiv_works?;
+    let mut biorxiv_works = biorxiv_works?;
+    let mut arxiv_works = arxiv_works?;
+    let tracked_ids = request
+        .people
+        .iter()
+        .filter_map(|person| person.openalex_id.as_deref())
+        .map(normalize_id)
+        .chain(request.author_ids.iter().cloned())
+        .collect::<Vec<_>>();
     if request.provider == Provider::OpenAlex && !curated_works.is_empty() {
-        curated_works =
-            match openalex_enrichment::enrich(&CLIENT, curated_works.clone(), mailto().as_deref())
-                .await
-            {
-                Ok(works) => works,
-                Err(error) => {
-                    eprintln!("{error}; serving curated records without OpenAlex enrichment");
-                    curated_works
-                }
-            };
+        curated_works = match openalex_enrichment::enrich(
+            &CLIENT,
+            curated_works.clone(),
+            mailto().as_deref(),
+            &tracked_ids,
+        )
+        .await
+        {
+            Ok(works) => works,
+            Err(error) => {
+                eprintln!("{error}; serving curated records without OpenAlex enrichment");
+                curated_works
+            }
+        };
+    }
+    for works in [
+        &mut provider_works,
+        &mut curated_works,
+        &mut biorxiv_works,
+        &mut arxiv_works,
+    ] {
+        mark_feed_authors(works, &tracked_ids);
     }
     let native_works = merge_works(arxiv_works, merge_works(biorxiv_works, curated_works));
     let mut works = merge_works(provider_works, native_works);
@@ -1549,33 +1581,6 @@ async fn fetch_openalex_works(request: &FeedRequest) -> Result<Vec<Work>, String
     mark_feed_authors(&mut journal_works, &request.author_ids);
 
     Ok(merge_works(author_works, journal_works))
-}
-
-fn mark_feed_authors(works: &mut [Work], feed_author_ids: &[String]) {
-    for work in works {
-        let Some(authorships) = work.authorships.as_deref() else {
-            continue;
-        };
-
-        for authorship in authorships {
-            let Some(author) = authorship.author.as_ref() else {
-                continue;
-            };
-            let Some(author_id) = author.id.as_deref().map(normalize_id) else {
-                continue;
-            };
-            if !feed_author_ids.contains(&author_id) {
-                continue;
-            }
-
-            work.matched_author_names
-                .extend(author.display_name.iter().cloned());
-            work.matched_author_names
-                .extend(authorship.raw_author_name.iter().cloned());
-        }
-        work.matched_author_names.sort();
-        work.matched_author_names.dedup();
-    }
 }
 
 /// Run a single `/works` query for the given filter (or return empty if `None`).
@@ -1781,37 +1786,153 @@ fn work_to_item(work: &Work) -> rss::Item {
         .build()
 }
 
-fn work_to_publication(work: &Work) -> reader::Publication {
+fn work_to_publication(work: &Work, people: &[config::PersonConfig]) -> reader::Publication {
+    let authorships = work.authorships.as_deref().unwrap_or_default();
+    let tracked_ids = people
+        .iter()
+        .filter_map(|person| person.openalex_id.as_deref())
+        .chain(
+            work.openalex_author_matches
+                .iter()
+                .map(|matched| matched.author_id.as_str()),
+        )
+        .map(normalize_id)
+        .collect::<HashSet<_>>();
+    let optional_ids = people
+        .iter()
+        .filter(|person| person.optional)
+        .filter_map(|person| person.openalex_id.as_deref())
+        .map(normalize_id)
+        .filter(|id| {
+            !people.iter().any(|person| {
+                !person.optional
+                    && person
+                        .openalex_id
+                        .as_deref()
+                        .is_some_and(|other| normalize_id(other) == *id)
+            })
+        })
+        .collect::<HashSet<_>>();
+    let resolved_id_matches = work
+        .openalex_author_matches
+        .iter()
+        .filter_map(|matched| {
+            let configured_name = people
+                .iter()
+                .find(|person| {
+                    person
+                        .openalex_id
+                        .as_deref()
+                        .is_some_and(|id| normalize_id(id) == normalize_id(&matched.author_id))
+                })
+                .map(|person| person.name.as_str());
+            resolve_openalex_author_match(authorships, matched, &tracked_ids, configured_name)
+                .map(|index| (index, normalize_id(&matched.author_id)))
+        })
+        .collect::<Vec<_>>();
+    let resolved_matches = work
+        .author_matches
+        .iter()
+        .filter_map(|matched| {
+            resolve_author_match(authorships, matched)
+                .map(|index| (index, matched.queried_name.as_str()))
+        })
+        .collect::<Vec<_>>();
     let matched_names = work
         .matched_author_names
         .iter()
+        .filter(|name| {
+            !work
+                .author_matches
+                .iter()
+                .any(|matched| &matched.matched_name == *name)
+                && !work
+                    .openalex_author_matches
+                    .iter()
+                    .any(|matched| &matched.matched_name == *name)
+        })
         .map(|name| normalize_author_name(name))
         .collect::<Vec<_>>();
-    let authors = work
-        .authorships
-        .as_deref()
-        .unwrap_or_default()
+    let authors = authorships
         .iter()
-        .filter_map(|authorship| {
+        .enumerate()
+        .filter_map(|(index, authorship)| {
             let display_name = authorship
                 .author
                 .as_ref()
                 .and_then(|author| author.display_name.clone())
                 .or_else(|| authorship.raw_author_name.clone())?;
             let filter_id = normalize_author_name(&display_name);
-            let matched_feed = authorship
-                .author
-                .as_ref()
-                .and_then(|author| author.display_name.as_deref())
+            let author_names = Some(display_name.as_str())
                 .into_iter()
                 .chain(authorship.raw_author_name.as_deref())
-                .map(normalize_author_name)
-                .any(|name| matched_names.contains(&name));
+                .collect::<Vec<_>>();
+            let matched_queries = resolved_matches
+                .iter()
+                .filter_map(|(matched_index, query)| (*matched_index == index).then_some(*query))
+                .collect::<Vec<_>>();
+            let actual_id = authorship
+                .author
+                .as_ref()
+                .and_then(|author| author.id.as_deref())
+                .map(normalize_id);
+            let direct_id = actual_id.as_ref().filter(|id| tracked_ids.contains(*id));
+            let matched_ids = resolved_id_matches
+                .iter()
+                .filter_map(|(matched_index, id)| (*matched_index == index).then_some(id))
+                .collect::<Vec<_>>();
+            let matched_feed = direct_id.is_some()
+                || !matched_ids.is_empty()
+                || !matched_queries.is_empty()
+                || author_names
+                    .iter()
+                    .map(|name| normalize_author_name(name))
+                    .any(|name| matched_names.contains(&name));
+            let optional = matched_feed
+                && if let Some(id) = direct_id {
+                    optional_ids.contains(id)
+                } else if !matched_ids.is_empty() {
+                    matched_ids.iter().all(|id| optional_ids.contains(*id))
+                } else if !matched_queries.is_empty() {
+                    matched_queries.iter().all(|query| {
+                        let mut matching_people = people.iter().filter(|person| {
+                            [
+                                Some(person.name.as_str()),
+                                person.google_scholar_name.as_deref(),
+                            ]
+                            .into_iter()
+                            .flatten()
+                            .any(|name| query.trim().eq_ignore_ascii_case(name.trim()))
+                        });
+                        matching_people.next().is_some_and(|person| person.optional)
+                            && matching_people.all(|person| person.optional)
+                    })
+                } else {
+                    let mut matching_people = people.iter().filter(|person| {
+                        (actual_id.is_none() || person.openalex_id.is_none())
+                            && [
+                                Some(person.name.as_str()),
+                                person.google_scholar_name.as_deref(),
+                            ]
+                            .into_iter()
+                            .flatten()
+                            .any(|name| {
+                                let matched = openalex::AuthorMatch {
+                                    queried_name: name.to_string(),
+                                    matched_name: name.to_string(),
+                                };
+                                resolve_author_match(authorships, &matched) == Some(index)
+                            })
+                    });
+                    matching_people.next().is_some_and(|person| person.optional)
+                        && matching_people.all(|person| person.optional)
+                };
 
             Some(reader::Author {
                 name: display_name,
                 filter_id,
                 matched_feed,
+                optional,
             })
         })
         .collect();
@@ -2186,7 +2307,7 @@ mod tests {
         assert_eq!(work_to_item(&work).content.as_deref(), Some(expected));
 
         let mut feed = empty_generated_feed().reader;
-        feed.publications.push(work_to_publication(&work));
+        feed.publications.push(work_to_publication(&work, &[]));
         let html = reader::render_article(&feed, "https://openalex.org/W7169812613", &[])
             .unwrap();
         assert!(html.contains("<h2 id=\"abstract-heading\">Abstract</h2>"));
@@ -2242,7 +2363,7 @@ mod tests {
         let feed_author_ids = vec!["A1".to_string(), "A2".to_string()];
 
         mark_feed_authors(&mut works, &feed_author_ids);
-        let publication = work_to_publication(&works[0]);
+        let publication = work_to_publication(&works[0], &[]);
         let item = work_to_item(&works[0]);
 
         assert_eq!(
@@ -2297,7 +2418,7 @@ mod tests {
 
         mark_feed_authors(&mut first_version, &["A-configured".to_string()]);
         let merged = merge_works(first_version, vec![richer]);
-        let publication = work_to_publication(&merged[0]);
+        let publication = work_to_publication(&merged[0], &[]);
 
         assert_eq!(merged[0].id.as_deref(), Some("W-richer"));
         assert_eq!(publication.authors.len(), 1);
@@ -2319,6 +2440,330 @@ mod tests {
         assert!(Provider::parse("unknown").is_err());
     }
 
+    fn identity_person(name: &str, id: &str, optional: bool) -> config::PersonConfig {
+        config::PersonConfig {
+            name: name.to_string(),
+            openalex_id: Some(id.to_string()),
+            google_scholar_name: None,
+            optional,
+        }
+    }
+
+    fn identity_work(id: &str, authors: &[(Option<&str>, &str)]) -> Work {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "doi": "https://doi.org/10.1234/identity",
+            "title": "Identity regression paper",
+            "authorships": authors.iter().map(|(id, name)| serde_json::json!({
+                "author": {"id": id, "display_name": name},
+                "raw_author_name": name,
+            })).collect::<Vec<_>>(),
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn openalex_optional_status_does_not_override_another_configured_identity() {
+        let people = [
+            identity_person("John A Smith", "A1", true),
+            identity_person("John B Smith", "https://openalex.org/A2", false),
+        ];
+        assert_eq!(
+            normalize_author_name(&people[0].name),
+            normalize_author_name(&people[1].name)
+        );
+        for name in [
+            "John B Smith",
+            "John A Smith",
+            "Unrelated provider spelling",
+        ] {
+            let mut works = vec![identity_work(
+                "W1",
+                &[(Some("https://openalex.org/A2"), name)],
+            )];
+            mark_feed_authors(&mut works, &["A1".to_string(), "A2".to_string()]);
+            mark_authors_by_name(
+                &mut works,
+                &people
+                    .iter()
+                    .map(|person| person.name.clone())
+                    .collect::<Vec<_>>(),
+            );
+            let publication = work_to_publication(&works[0], &people);
+            assert!(publication.authors[0].matched_feed);
+            assert!(!publication.authors[0].optional, "{name}");
+            let feed = reader::Feed {
+                title: "Identity".to_string(),
+                description: String::new(),
+                publications: vec![publication],
+                paper_sources: Vec::new(),
+            };
+            assert!(reader::render_feed(&feed, &[]).contains("Identity regression paper"));
+        }
+    }
+
+    #[test]
+    fn openalex_optional_identity_survives_richer_versions_and_serialization() {
+        let people = [identity_person("Sophia Tang", "A1", true)];
+        for (original_name, richer_name) in [
+            ("Sophia Tang", "Tang, Sophia"),
+            ("S Tang", "S. K. Tang"),
+            ("Sophia K Tang", "Sophia Tang"),
+        ] {
+            for richer_id in [Some("A-duplicate"), None] {
+                for richer_first in [false, true] {
+                    let mut original = vec![identity_work(
+                        "W-original",
+                        &[(Some("https://openalex.org/A1"), original_name)],
+                    )];
+                    mark_feed_authors(&mut original, &["A1".to_string()]);
+                    mark_feed_authors(&mut original, &["A1".to_string()]);
+                    assert_eq!(original[0].openalex_author_matches.len(), 1);
+                    let original_matches = original[0].openalex_author_matches.clone();
+                    let mut richer = identity_work("W-richer", &[(richer_id, richer_name)]);
+                    richer.abstract_text_override = Some("Richer abstract".to_string());
+                    richer.best_oa_location = serde_json::from_value(serde_json::json!({
+                        "pdf_url": "https://example.com/richer.pdf"
+                    }))
+                    .unwrap();
+                    let mut merged = if richer_first {
+                        merge_works(vec![richer], original)
+                    } else {
+                        merge_works(original, vec![richer])
+                    };
+                    mark_authors_by_name(&mut merged, &["Sophia Tang".to_string()]);
+                    assert_eq!(merged.len(), 1);
+                    assert_eq!(merged[0].id.as_deref(), Some("W-richer"));
+                    let restored: Work =
+                        serde_json::from_str(&serde_json::to_string(&merged[0]).unwrap()).unwrap();
+                    assert_eq!(restored.openalex_author_matches, original_matches);
+                    let rss_before = work_to_item(&restored);
+                    let publication = work_to_publication(&restored, &people);
+                    assert!(publication.authors[0].matched_feed);
+                    assert!(
+                        publication.authors[0].optional,
+                        "{original_name} -> {richer_name}"
+                    );
+                    let filter_id = publication.authors[0].filter_id.clone();
+                    let feed = reader::Feed {
+                        title: "Identity".to_string(),
+                        description: String::new(),
+                        publications: vec![publication],
+                        paper_sources: Vec::new(),
+                    };
+                    assert!(!reader::render_feed(&feed, &[]).contains("Identity regression paper"));
+                    assert!(
+                        reader::render_feed(&feed, &[("view_author".to_string(), filter_id)])
+                            .contains("Identity regression paper")
+                    );
+                    assert_eq!(work_to_item(&restored), rss_before);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn openalex_replacement_cannot_inherit_another_configured_identity() {
+        let people = [
+            identity_person("Sophia Tang", "A1", true),
+            identity_person("Sophia Tang", "A2", false),
+        ];
+        let mut original = vec![identity_work("W-original", &[(Some("A1"), "Sophia Tang")])];
+        mark_feed_authors(&mut original, &["A1".to_string()]);
+        let mut richer = identity_work(
+            "W-richer",
+            &[(Some("https://openalex.org/A2"), "Tang, Sophia")],
+        );
+        richer.best_oa_location = serde_json::from_value(serde_json::json!({
+            "pdf_url": "https://example.com/richer.pdf"
+        }))
+        .unwrap();
+        // A2 is configured but has no stored match in this incoming version.
+        let merged = merge_works(original, vec![richer]);
+        let publication = work_to_publication(&merged[0], &people);
+        assert_eq!(merged[0].id.as_deref(), Some("W-richer"));
+        assert!(publication.authors[0].matched_feed);
+        assert!(!publication.authors[0].optional);
+    }
+
+    #[test]
+    fn openalex_optional_associations_reject_conflicts_and_ambiguity() {
+        let people = [identity_person("John A Smith", "A1", true)];
+        for names in [
+            vec!["John B Smith"],
+            vec!["Jane A Smith"],
+            vec!["J A Smith", "John A Smith"],
+        ] {
+            let mut works = vec![identity_work("W1", &[(Some("A1"), "J Smith")])];
+            mark_feed_authors(&mut works, &["A1".to_string()]);
+            works[0].authorships = identity_work(
+                "W2",
+                &names
+                    .iter()
+                    .map(|name| (Some("A-unknown"), *name))
+                    .collect::<Vec<_>>(),
+            )
+            .authorships;
+            let publication = work_to_publication(&works[0], &people);
+            assert!(
+                publication
+                    .authors
+                    .iter()
+                    .all(|author| !author.matched_feed && !author.optional),
+                "{names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn swapped_given_names_do_not_inherit_optional_provider_identity() {
+        let people = [identity_person("John Alan Smith", "A1", true)];
+        for scholar in [false, true] {
+            for (original_name, replacement_name) in [
+                ("J A Smith", "A J Smith"),
+                ("John Alan Smith", "Alan John Smith"),
+            ] {
+                let mut original = vec![identity_work(
+                    "W-original",
+                    &[(if scholar { None } else { Some("A1") }, original_name)],
+                )];
+                if scholar {
+                    original[0]
+                        .matched_author_names
+                        .push(original_name.to_string());
+                    original[0].author_matches.push(openalex::AuthorMatch {
+                        queried_name: people[0].name.clone(),
+                        matched_name: original_name.to_string(),
+                    });
+                } else {
+                    mark_feed_authors(&mut original, &["A1".to_string()]);
+                }
+                let mut richer =
+                    identity_work("W-richer", &[(Some("A-unknown"), replacement_name)]);
+                richer.best_oa_location = serde_json::from_value(serde_json::json!({
+                    "pdf_url": "https://example.com/richer.pdf"
+                }))
+                .unwrap();
+                let mut merged = merge_works(original, vec![richer]);
+                mark_authors_by_name(&mut merged, &[people[0].name.clone()]);
+                assert_eq!(merged.len(), 1);
+                assert_eq!(merged[0].id.as_deref(), Some("W-richer"));
+                let publication = work_to_publication(&merged[0], &people);
+                assert!(
+                    !publication.authors[0].optional,
+                    "{original_name} -> {replacement_name}"
+                );
+                let feed = reader::Feed {
+                    title: "Ordered names".to_string(),
+                    description: String::new(),
+                    publications: vec![publication],
+                    paper_sources: Vec::new(),
+                };
+                assert!(reader::render_feed(&feed, &[]).contains("Identity regression paper"));
+            }
+        }
+    }
+
+    #[test]
+    fn name_only_optional_matching_preserves_initials_and_rejects_known_id_mismatches() {
+        let people = [
+            identity_person("John A Smith", "A1", true),
+            identity_person("John B Smith", "A2", false),
+        ];
+        for (id, name, optional) in [
+            (None, "John A Smith", true),
+            (None, "John B Smith", false),
+            (Some("A-unknown"), "John A Smith", false),
+        ] {
+            let mut works = vec![identity_work("W1", &[(id, name)])];
+            mark_authors_by_name(
+                &mut works,
+                &people
+                    .iter()
+                    .map(|person| person.name.clone())
+                    .collect::<Vec<_>>(),
+            );
+            let publication = work_to_publication(&works[0], &people);
+            assert!(publication.authors[0].matched_feed);
+            assert_eq!(publication.authors[0].optional, optional);
+        }
+    }
+
+    #[tokio::test]
+    async fn optional_people_preserve_provider_queries_and_rss_but_change_reader_defaults() {
+        let mut config: Config = toml::from_str(
+            r#"
+default_feed = "example"
+[[feeds.example.people]]
+name = "Ada Lovelace"
+openalex_id = "A1"
+[[feeds.example.people]]
+name = "Grace Hopper"
+google_scholar_name = "Grace Brewster Hopper"
+openalex_id = "A2"
+optional = true
+"#,
+        )
+        .unwrap();
+        for provider in [Provider::OpenAlex, Provider::GoogleScholar] {
+            let request = resolve_feed_request(&[], &config, provider)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(request.people.len(), 2);
+            assert_eq!(
+                request
+                    .people
+                    .iter()
+                    .filter(|person| person.optional)
+                    .count(),
+                1
+            );
+            if provider == Provider::OpenAlex {
+                assert_eq!(request.author_ids, ["A1", "A2"]);
+            } else {
+                assert_eq!(
+                    request.google_scholar_authors,
+                    ["Ada Lovelace", "Grace Brewster Hopper"]
+                );
+            }
+            for (id, name) in [
+                (
+                    Some("https://openalex.org/A2"),
+                    "Different provider spelling",
+                ),
+                (None, "Grace Brewster Hopper"),
+                (None, "Hopper, Grace"),
+            ] {
+                let mut works: Vec<Work> = vec![serde_json::from_value(serde_json::json!({
+                    "title": "Optional paper",
+                    "authorships": [{"author": {"id": id, "display_name": name}}]
+                }))
+                .unwrap()];
+                mark_feed_authors(&mut works, &["A2".to_string()]);
+                mark_authors_by_name(&mut works, &request.tracked_author_names);
+                let work = &works[0];
+                let publication = work_to_publication(work, &request.people);
+                assert!(publication.authors[0].matched_feed);
+                assert!(publication.authors[0].optional);
+                assert_eq!(work_to_item(work).title(), Some("Optional paper"));
+                assert!(!work_to_publication(work, &[]).authors[0].optional);
+            }
+            config.feeds.get_mut("example").unwrap().people[1].optional = false;
+            let selected = resolve_feed_request(&[], &config, provider)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_ne!(request.cache_key(), selected.cache_key());
+            assert_eq!(request.author_ids, selected.author_ids);
+            assert_eq!(
+                request.google_scholar_authors,
+                selected.google_scholar_authors
+            );
+            config.feeds.get_mut("example").unwrap().people[1].optional = true;
+        }
+    }
+
     #[test]
     fn feed_titles_are_part_of_cache_identity() {
         let mut first = FeedRequest {
@@ -2326,6 +2771,7 @@ mod tests {
             author_ids: vec!["A1".to_string()],
             google_scholar_authors: Vec::new(),
             tracked_author_names: Vec::new(),
+            people: Vec::new(),
             curated_sources: Vec::new(),
             biorxiv_categories: Vec::new(),
             arxiv_categories: Vec::new(),
@@ -2351,6 +2797,7 @@ mod tests {
             author_ids: vec!["A1".to_string()],
             google_scholar_authors: Vec::new(),
             tracked_author_names: Vec::new(),
+            people: Vec::new(),
             curated_sources: Vec::new(),
             biorxiv_categories: Vec::new(),
             arxiv_categories: Vec::new(),

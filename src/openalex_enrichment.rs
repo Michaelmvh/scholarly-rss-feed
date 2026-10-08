@@ -1,5 +1,5 @@
 use crate::openalex::{Work, WorksResponse, API_BASE};
-use crate::works::merge_works;
+use crate::works::{mark_feed_authors, merge_works};
 use lazy_static::lazy_static;
 use parking_lot::RwLock;
 use std::collections::HashSet;
@@ -26,18 +26,19 @@ pub async fn enrich(
     client: &reqwest::Client,
     curated_works: Vec<Work>,
     mailto: Option<&str>,
+    tracked_author_ids: &[String],
 ) -> Result<Vec<Work>, String> {
     let identifiers = stable_identifiers(&curated_works);
     if identifiers.is_empty() {
         return Ok(curated_works);
     }
     if let Some(works) = cached_works(&identifiers) {
-        return Ok(merge_works(works, curated_works));
+        return Ok(merge_enriched(works, curated_works, tracked_author_ids));
     }
 
     let _refresh_guard = REFRESH.lock().await;
     if let Some(works) = cached_works(&identifiers) {
-        return Ok(merge_works(works, curated_works));
+        return Ok(merge_enriched(works, curated_works, tracked_author_ids));
     }
 
     let mut identifiers_sorted = identifiers.iter().cloned().collect::<Vec<_>>();
@@ -52,7 +53,17 @@ pub async fn enrich(
         identifiers,
         works: enriched.clone(),
     });
-    Ok(merge_works(enriched, curated_works))
+    Ok(merge_enriched(enriched, curated_works, tracked_author_ids))
+}
+
+fn merge_enriched(
+    mut enriched: Vec<Work>,
+    mut curated: Vec<Work>,
+    tracked_author_ids: &[String],
+) -> Vec<Work> {
+    mark_feed_authors(&mut enriched, tracked_author_ids);
+    mark_feed_authors(&mut curated, tracked_author_ids);
+    merge_works(enriched, curated)
 }
 
 fn cached_works(identifiers: &HashSet<String>) -> Option<Vec<Work>> {
@@ -185,6 +196,41 @@ mod tests {
                 "10.48550/arxiv.2605.26690".to_string()
             ])
         );
+    }
+
+    #[test]
+    fn enrichment_retains_identity_before_replacing_authorships_without_mutating_cached_records() {
+        let enriched: Work = serde_json::from_value(serde_json::json!({
+            "id": "W1",
+            "doi": "https://doi.org/10.1000/identity",
+            "authorships": [{"author": {"id": "https://openalex.org/A1", "display_name": "Sophia Tang"}}]
+        }))
+        .unwrap();
+        let curated: Work = serde_json::from_value(serde_json::json!({
+            "id": "curated:richer",
+            "doi": "https://doi.org/10.1000/identity",
+            "authorships": [{"author": {"display_name": "Tang, Sophia"}}],
+            "best_oa_location": {"pdf_url": "https://example.com/richer.pdf"}
+        }))
+        .unwrap();
+        for tracked_ids in [vec!["A1".to_string()], Vec::new()] {
+            let merged =
+                merge_enriched(vec![enriched.clone()], vec![curated.clone()], &tracked_ids);
+            assert_eq!(merged.len(), 1);
+            assert_eq!(merged[0].id.as_deref(), Some("curated:richer"));
+            assert_eq!(merged[0].openalex_author_matches.len(), tracked_ids.len());
+            let people = [crate::config::PersonConfig {
+                name: "Sophia Tang".to_string(),
+                openalex_id: Some("A1".to_string()),
+                google_scholar_name: None,
+                optional: true,
+            }];
+            let publication = crate::work_to_publication(&merged[0], &people);
+            assert_eq!(publication.authors[0].matched_feed, !tracked_ids.is_empty());
+            assert_eq!(publication.authors[0].optional, !tracked_ids.is_empty());
+        }
+        assert!(enriched.openalex_author_matches.is_empty());
+        assert!(curated.openalex_author_matches.is_empty());
     }
 
     #[test]

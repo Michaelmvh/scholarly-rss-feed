@@ -1,5 +1,7 @@
 use super::filters::{
-    is_view_param, FilterOptions, Period, ViewFilters, AUTHOR_PARAM, PERIOD_PARAM,
+    author_selection_fingerprint, is_view_param, AuthorSelection, FilterOptions, Period,
+    ViewFilters, AUTHOR_MODE_PARAM, AUTHOR_OPTIONS_PARAM, AUTHOR_PARAM, AUTHOR_SELECTION_PARAM,
+    PERIOD_PARAM,
 };
 use super::{Author, Feed, Publication};
 use crate::provenance::{DiscoverySource, DiscoverySourceKind};
@@ -16,7 +18,7 @@ pub fn render_feed(feed: &Feed, params: &[(String, String)]) -> String {
     let description = escape_html(&feed.description);
     let rss_url = escape_html(&raw_feed_url(params));
     let options = FilterOptions::from_feed(feed);
-    let filters = ViewFilters::from_params(params).validated(&options);
+    let filters = ViewFilters::from_params(params, &options);
     let today = chrono::Utc::now().date_naive();
     let publications = feed
         .publications
@@ -24,7 +26,7 @@ pub fn render_feed(feed: &Feed, params: &[(String, String)]) -> String {
         .filter(|publication| filters.matches_on(publication, today))
         .collect::<Vec<_>>();
     let item_count = publications.len();
-    let item_label = if filters != ViewFilters::default() {
+    let item_label = if filters != ViewFilters::default() || item_count != feed.publications.len() {
         format!("{item_count} of {} publications", feed.publications.len())
     } else if item_count == 1 {
         "1 publication".to_string()
@@ -83,7 +85,7 @@ pub fn render_feed(feed: &Feed, params: &[(String, String)]) -> String {
   <link rel="alternate" type="application/rss+xml" title="{title}" href="{rss_url}">
   <title>{title}</title>
   <link rel="stylesheet" href="/reader.css?v=5">
-  <script src="/reader.js?v=5" defer></script>
+  <script src="/reader.js?v=7" defer></script>
 </head>
 <body>
   <main>
@@ -339,7 +341,16 @@ fn render_filter_form(
         )
     })
     .collect::<String>();
-    let author_filter = render_author_filter(&filters.authors, &options.authors);
+    let selected_authors = match filters.author_selection {
+        AuthorSelection::Default => options.default_authors(),
+        AuthorSelection::All => options.authors.keys().cloned().collect(),
+        AuthorSelection::Custom => filters.authors.clone(),
+    };
+    let author_filter = render_author_filter(
+        &selected_authors,
+        &options.authors,
+        filters.author_selection,
+    );
     let paper_source_filter = render_paper_source_filter(paper_sources);
     let (filter_action_class, clear_link) = if filters == &ViewFilters::default() {
         ("filter-actions no-clear", String::new())
@@ -425,15 +436,31 @@ fn render_paper_source_filter(options: &[super::PaperSourceOption]) -> String {
 fn render_author_filter(
     selected: &[String],
     options: &std::collections::BTreeMap<String, String>,
+    selection: AuthorSelection,
 ) -> String {
+    let mode = match selection {
+        AuthorSelection::Default => "default",
+        AuthorSelection::All => "all",
+        AuthorSelection::Custom => "custom",
+    };
+    let selection_fingerprint = author_selection_fingerprint(selected);
+    let options_fingerprint =
+        author_selection_fingerprint(&options.keys().cloned().collect::<Vec<_>>());
+    let hidden = format!(
+        r#"<input type="hidden" name="{AUTHOR_MODE_PARAM}" value="{mode}">
+        <input type="hidden" name="{AUTHOR_SELECTION_PARAM}" value="{selection_fingerprint}">
+        <input type="hidden" name="{AUTHOR_OPTIONS_PARAM}" value="{options_fingerprint}">"#
+    );
     if options.is_empty() {
-        return String::new();
+        return hidden;
     }
 
     let mut options = options.iter().collect::<Vec<_>>();
     options.sort_by(|left, right| left.1.cmp(right.1));
+    let all_selected = selected.len() == options.len();
     let selection_summary = match selected {
-        [] => "Any tracked author".to_string(),
+        _ if all_selected => "All tracked authors".to_string(),
+        [] => "No tracked authors".to_string(),
         [value] => options
             .iter()
             .find(|(option, _)| option.as_str() == value)
@@ -457,11 +484,11 @@ fn render_author_filter(
             )
         })
         .collect::<String>();
-    let all_checked = if selected.is_empty() { " checked" } else { "" };
-
+    let all_checked = if all_selected { " checked" } else { "" };
     format!(
         r#"<details class="filter-multiselect" data-author-picker>
             <summary><span class="filter-label">Tracked authors</span><span class="filter-value" data-selection-summary>{}</span></summary>
+            {hidden}
             <div class="filter-options">
               <label class="filter-checkbox filter-select-all" hidden><input type="checkbox" data-select-all{all_checked}><span>All tracked authors</span></label>
               <div class="filter-option-list">{checkboxes}</div>
@@ -611,16 +638,19 @@ mod tests {
                         name: "Ada Lovelace".to_string(),
                         filter_id: "ada lovelace".to_string(),
                         matched_feed: true,
+                        optional: false,
                     },
                     Author {
                         name: "Grace Hopper".to_string(),
                         filter_id: "grace-hopper".to_string(),
                         matched_feed: true,
+                        optional: false,
                     },
                     Author {
                         name: "Alan Turing".to_string(),
                         filter_id: "alan-turing".to_string(),
                         matched_feed: false,
+                        optional: false,
                     },
                 ],
                 abstract_text: Some("<strong>abstract</strong>".to_string()),
@@ -635,6 +665,471 @@ mod tests {
                 curated_categories: vec!["Protein design".to_string()],
             }],
         }
+    }
+
+    fn optional_author_feed() -> Feed {
+        let mut feed = sample_feed();
+        let mut optional_only = feed.publications[0].clone();
+        optional_only.title = "Optional-only paper".to_string();
+        optional_only.id = Some("optional-paper".to_string());
+        optional_only
+            .authors
+            .retain(|author| author.name == "Grace Hopper");
+        optional_only.authors[0].optional = true;
+        feed.publications[0].authors[1].optional = true;
+        let mut untracked = optional_only.clone();
+        untracked.title = "Untracked collection paper".to_string();
+        untracked.id = Some("untracked-paper".to_string());
+        untracked.authors.clear();
+        feed.publications.extend([optional_only, untracked]);
+        feed
+    }
+
+    fn checked_authors(html: &str) -> Vec<String> {
+        Html::parse_document(html)
+            .select(&Selector::parse("input[name=view_author][checked]").unwrap())
+            .map(|input| input.value().attr("value").unwrap().to_string())
+            .collect()
+    }
+
+    fn submitted_form(html: &str) -> Vec<(String, String)> {
+        let document = Html::parse_document(html);
+        let inputs = Selector::parse("form.filters input[name]").unwrap();
+        let selects = Selector::parse("form.filters select[name]").unwrap();
+        let selected_option = Selector::parse("option[selected]").unwrap();
+        let mut params = document
+            .select(&inputs)
+            .filter(|input| {
+                input.value().attr("disabled").is_none()
+                    && (input.value().attr("type") != Some("checkbox")
+                        || input.value().attr("checked").is_some())
+            })
+            .map(|input| {
+                (
+                    input.value().attr("name").unwrap().to_string(),
+                    input.value().attr("value").unwrap_or("").to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        params.extend(document.select(&selects).map(|select| {
+            (
+                select.value().attr("name").unwrap().to_string(),
+                select
+                    .select(&selected_option)
+                    .next()
+                    .unwrap()
+                    .value()
+                    .attr("value")
+                    .unwrap()
+                    .to_string(),
+            )
+        }));
+        params
+    }
+
+    #[test]
+    fn colliding_author_filters_keep_nonoptional_defaults_when_another_checkbox_changes() {
+        let mut feed = sample_feed();
+        let template = feed.publications[0].clone();
+        feed.publications = [
+            ("John A Smith", true),
+            ("John B Smith", false),
+            ("Ada Lovelace", false),
+            ("Grace Hopper", true),
+            ("Alan Turing", true),
+        ]
+        .into_iter()
+        .map(|(name, optional)| {
+            let mut publication = template.clone();
+            publication.id = Some(name.to_string());
+            publication.title = format!("{name} paper");
+            publication.authors = vec![Author {
+                name: name.to_string(),
+                filter_id: crate::works::normalize_author_name(name),
+                matched_feed: true,
+                optional,
+            }];
+            publication
+        })
+        .collect();
+        for _ in 0..2 {
+            let initial = render_feed(&feed, &[]);
+            assert_eq!(checked_authors(&initial), ["ada lovelace", "john smith"]);
+            assert!(initial.contains("John B Smith paper"));
+            assert!(!initial.contains("John A Smith paper"));
+            for javascript in [false, true] {
+                let mut submitted = submitted_form(&initial);
+                submitted.push((AUTHOR_PARAM.to_string(), "grace hopper".to_string()));
+                if javascript {
+                    submitted.retain(|(name, _)| name != AUTHOR_SELECTION_PARAM);
+                    for (name, value) in &mut submitted {
+                        if name == AUTHOR_MODE_PARAM {
+                            *value = "custom".to_string();
+                        }
+                    }
+                }
+                let edited = render_feed(&feed, &submitted);
+                assert!(edited.contains(r#"name="view_authors" value="custom""#));
+                assert!(edited.contains("John B Smith paper"));
+                assert!(edited.contains("Grace Hopper paper"));
+                assert!(!edited.contains("Alan Turing paper"));
+                assert_eq!(
+                    checked_authors(&edited),
+                    ["ada lovelace", "grace hopper", "john smith"]
+                );
+            }
+            feed.publications.reverse();
+        }
+    }
+
+    #[test]
+    fn configured_author_form_stays_within_request_limits() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../../feeds.toml")).unwrap();
+        let mut feed = sample_feed();
+        feed.publications[0].authors = config.feeds["bioml"]
+            .people
+            .iter()
+            .map(|person| Author {
+                name: person.name.clone(),
+                filter_id: crate::works::normalize_author_name(&person.name),
+                matched_feed: true,
+                optional: person.optional,
+            })
+            .collect();
+        let html = render_feed(&feed, &[]);
+        let mut params = submitted_form(&html);
+        let authors = checked_authors(&html);
+        assert!(serde_json::to_string(&authors).unwrap().len() > crate::MAX_QUERY_VALUE_LENGTH);
+        let fingerprint = params
+            .iter()
+            .find(|(name, _)| name == AUTHOR_SELECTION_PARAM)
+            .unwrap();
+        assert_eq!(fingerprint.1.len(), 64);
+        for (name, value) in &mut params {
+            if name == PERIOD_PARAM {
+                *value = "90d".to_string();
+            }
+        }
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(&params)
+            .finish();
+        assert!(crate::validate_dynamic_request(&query, &params).is_ok());
+        assert_eq!(
+            ViewFilters::from_params(&params, &FilterOptions::from_feed(&feed)).author_selection,
+            AuthorSelection::Default
+        );
+    }
+
+    #[test]
+    fn large_author_forms_stay_within_request_limits() {
+        let mut feed = sample_feed();
+        feed.publications[0].authors = (0..150)
+            .map(|index| Author {
+                name: format!("Author {index}"),
+                filter_id: format!("author-{index}"),
+                matched_feed: true,
+                optional: false,
+            })
+            .collect();
+        for mode in ["default", "all", "custom"] {
+            let mut initial = vec![(AUTHOR_MODE_PARAM.to_string(), mode.to_string())];
+            if mode == "custom" {
+                initial.extend(
+                    feed.publications[0].authors[..125]
+                        .iter()
+                        .map(|author| (AUTHOR_PARAM.to_string(), author.filter_id.clone())),
+                );
+            }
+            let mut params = submitted_form(&render_feed(&feed, &initial));
+            assert!(params.len() > crate::MAX_QUERY_PARAMS);
+            for (name, value) in &mut params {
+                if name == PERIOD_PARAM {
+                    *value = "90d".to_string();
+                }
+            }
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs(&params)
+                .finish();
+            assert!(crate::validate_dynamic_request(&query, &params).is_ok());
+            let html = render_feed(&feed, &params);
+            assert!(html.contains(&format!(r#"name="view_authors" value="{mode}""#)));
+            assert_eq!(
+                checked_authors(&html).len(),
+                if mode == "custom" { 125 } else { 150 }
+            );
+        }
+    }
+
+    #[test]
+    fn custom_author_selection_does_not_broaden_when_sources_shrink() {
+        let feed = optional_author_feed();
+        let initial = vec![
+            (AUTHOR_MODE_PARAM.to_string(), "custom".to_string()),
+            (AUTHOR_PARAM.to_string(), "ada lovelace".to_string()),
+        ];
+        let submitted = submitted_form(&render_feed(&feed, &initial));
+        let mut narrower = feed.clone();
+        for publication in &mut narrower.publications {
+            publication
+                .authors
+                .retain(|author| author.filter_id == "ada lovelace");
+        }
+        for params in [&initial, &submitted] {
+            let html = render_feed(&narrower, params);
+            assert!(html.contains(r#"name="view_authors" value="custom""#));
+            assert!(!html.contains("Untracked collection paper"));
+            assert!(!html.contains("Optional-only paper"));
+            let restored = render_feed(&feed, &submitted_form(&html));
+            assert_eq!(checked_authors(&restored), ["ada lovelace"]);
+            assert!(!restored.contains("Optional-only paper"));
+            assert!(!restored.contains("Untracked collection paper"));
+        }
+        let mut no_authors = feed.clone();
+        no_authors
+            .publications
+            .retain(|paper| paper.authors.is_empty());
+        let html = render_feed(&no_authors, &submitted);
+        assert!(html.contains(r#"name="view_authors" value="custom""#));
+        assert!(html.contains("0 of 1 publications"));
+    }
+
+    #[test]
+    fn no_javascript_author_edits_use_original_options_across_source_changes() {
+        let feed = optional_author_feed();
+        let mut expanded = feed.clone();
+        let mut added = feed.publications[1].clone();
+        added.title = "New source paper".to_string();
+        added.authors[0].name = "New author".to_string();
+        added.authors[0].filter_id = "new-author".to_string();
+        expanded.publications.push(added);
+        for mode in ["default", "custom"] {
+            let mut initial = vec![(AUTHOR_MODE_PARAM.to_string(), mode.to_string())];
+            if mode == "custom" {
+                initial.push((AUTHOR_PARAM.to_string(), "ada lovelace".to_string()));
+            }
+            let mut params = submitted_form(&render_feed(&feed, &initial));
+            params.push((AUTHOR_PARAM.to_string(), "grace-hopper".to_string()));
+            let html = render_feed(&expanded, &params);
+            assert!(html.contains(r#"name="view_authors" value="all""#));
+            assert!(html.contains("New source paper"));
+            assert!(html.contains("Untracked collection paper"));
+            assert_eq!(checked_authors(&html).len(), 3);
+            assert_eq!(raw_feed_url(&params), "?paper_sources=custom&rss");
+            assert_eq!(unfiltered_reader_url(&params), "/?paper_sources=custom");
+        }
+
+        let mut params = submitted_form(&render_feed(
+            &feed,
+            &[(AUTHOR_MODE_PARAM.to_string(), "all".to_string())],
+        ));
+        params.retain(|(name, value)| name != AUTHOR_PARAM || value != "grace-hopper");
+        let mut narrower = feed.clone();
+        for publication in &mut narrower.publications {
+            publication
+                .authors
+                .retain(|author| author.filter_id == "ada lovelace");
+        }
+        let html = render_feed(&narrower, &params);
+        assert!(html.contains(r#"name="view_authors" value="custom""#));
+        assert!(!html.contains("Untracked collection paper"));
+    }
+
+    #[test]
+    fn all_selection_survives_source_changes_and_supports_no_javascript_edits() {
+        let mut feed = optional_author_feed();
+        let html = render_feed(&feed, &[(AUTHOR_MODE_PARAM.to_string(), "all".to_string())]);
+        let params = submitted_form(&html);
+        assert!(params.contains(&(AUTHOR_MODE_PARAM.to_string(), "all".to_string())));
+        let mut added = feed.publications[0].clone();
+        added.id = Some("new-source-paper".to_string());
+        added.title = "New source paper".to_string();
+        added.authors = vec![Author {
+            name: "New tracked author".to_string(),
+            filter_id: "new author".to_string(),
+            matched_feed: true,
+            optional: true,
+        }];
+        feed.publications.push(added);
+
+        let all = render_feed(&feed, &params);
+        assert_eq!(
+            checked_authors(&all),
+            ["ada lovelace", "grace-hopper", "new author"]
+        );
+        assert!(all.contains("Untracked collection paper"));
+        assert!(all.contains("New source paper"));
+        assert!(all.contains(r#"name="view_authors" value="all""#));
+        assert_eq!(raw_feed_url(&params), "?paper_sources=custom&rss");
+
+        let mut edited = params.clone();
+        edited.retain(|(name, value)| name != AUTHOR_PARAM || value != "grace-hopper");
+        let custom = render_feed(&feed, &edited);
+        assert_eq!(checked_authors(&custom), ["ada lovelace"]);
+        assert!(!custom.contains("Optional-only paper"));
+        assert!(!custom.contains("New source paper"));
+        assert!(!custom.contains("Untracked collection paper"));
+        assert!(custom.contains(r#"name="view_authors" value="custom""#));
+
+        edited.retain(|(name, _)| name != AUTHOR_PARAM);
+        assert!(render_feed(&feed, &edited).contains("0 of 4 publications"));
+    }
+
+    #[test]
+    fn all_selection_survives_a_source_with_no_tracked_authors() {
+        let mut feed = optional_author_feed();
+        feed.publications
+            .retain(|publication| publication.authors.is_empty());
+        let html = render_feed(&feed, &[(AUTHOR_MODE_PARAM.to_string(), "all".to_string())]);
+        let params = submitted_form(&html);
+        assert!(params.contains(&(AUTHOR_MODE_PARAM.to_string(), "all".to_string())));
+        assert!(checked_authors(&html).is_empty());
+        let restored = render_feed(&optional_author_feed(), &params);
+        assert_eq!(checked_authors(&restored), ["ada lovelace", "grace-hopper"]);
+        assert!(restored.contains("Optional-only paper"));
+        assert!(restored.contains("Untracked collection paper"));
+    }
+
+    #[test]
+    fn default_reader_selects_regular_authors_and_hides_optional_only_papers() {
+        let html = render_feed(&optional_author_feed(), &[]);
+
+        assert_eq!(checked_authors(&html), ["ada lovelace"]);
+        assert!(html.contains("2 of 3 publications"));
+        assert!(!html.contains("Optional-only paper"));
+        assert!(html.contains("Untracked collection paper"));
+        assert!(
+            html.contains(r#"name="view_author" value="grace-hopper" data-label="Grace Hopper">"#)
+        );
+        assert!(html.contains(r#"name="view_authors" value="default""#));
+        let document = Html::parse_document(&html);
+        let defaults_input = Selector::parse("input[name=view_author_selection]").unwrap();
+        assert_eq!(
+            document
+                .select(&defaults_input)
+                .next()
+                .unwrap()
+                .value()
+                .attr("value"),
+            Some(author_selection_fingerprint(&["ada lovelace".to_string()]).as_str())
+        );
+        assert!(!html.contains("Clear filters"));
+    }
+
+    #[test]
+    fn explicit_selection_can_include_optional_authors_or_no_authors() {
+        let feed = optional_author_feed();
+        let params = vec![
+            (AUTHOR_MODE_PARAM.to_string(), "custom".to_string()),
+            (AUTHOR_PARAM.to_string(), "grace-hopper".to_string()),
+        ];
+        let html = render_feed(&feed, &params);
+        assert_eq!(checked_authors(&html), ["grace-hopper"]);
+        assert!(html.contains("Optional-only paper"));
+        assert!(!html.contains("Untracked collection paper"));
+        assert!(html.contains("2 of 3 publications"));
+        assert_eq!(raw_feed_url(&params), "?rss");
+        assert_eq!(unfiltered_reader_url(&params), "/");
+        let article = render_article(&feed, "optional-paper", &params).unwrap();
+        assert!(article.contains(r#"href="/?view_authors=custom&amp;view_author=grace-hopper""#));
+
+        let none = render_feed(
+            &feed,
+            &[(AUTHOR_MODE_PARAM.to_string(), "custom".to_string())],
+        );
+        assert!(checked_authors(&none).is_empty());
+        assert!(none.contains("0 of 3 publications"));
+        assert!(none.contains("No tracked authors"));
+
+        let all = render_feed(&feed, &[(AUTHOR_MODE_PARAM.to_string(), "all".to_string())]);
+        assert_eq!(checked_authors(&all), ["ada lovelace", "grace-hopper"]);
+        assert!(all.contains("3 of 3 publications"));
+        assert!(all.contains("Untracked collection paper"));
+    }
+
+    #[test]
+    fn author_form_submission_preserves_defaults_and_supports_no_javascript_changes() {
+        let feed = optional_author_feed();
+        let mut params = submitted_form(&render_feed(&feed, &[]));
+        let defaults = render_feed(&feed, &params);
+        assert!(!defaults.contains("Optional-only paper"));
+        assert!(defaults.contains("Untracked collection paper"));
+
+        params.push((AUTHOR_PARAM.to_string(), "grace-hopper".to_string()));
+        let all = render_feed(&feed, &params);
+        assert!(all.contains("Optional-only paper"));
+        assert!(all.contains("Untracked collection paper"));
+
+        params.retain(|(name, _)| name != AUTHOR_PARAM);
+        let none = render_feed(&feed, &params);
+        assert!(none.contains("0 of 3 publications"));
+    }
+
+    #[test]
+    fn defaults_survive_paper_source_changes_that_add_author_options() {
+        let mut feed = optional_author_feed();
+        let params = vec![
+            (AUTHOR_MODE_PARAM.to_string(), "default".to_string()),
+            (
+                AUTHOR_SELECTION_PARAM.to_string(),
+                author_selection_fingerprint(&["ada lovelace".to_string()]),
+            ),
+            (AUTHOR_PARAM.to_string(), "ada lovelace".to_string()),
+        ];
+        feed.publications[2].authors.push(Author {
+            name: "New tracked author".to_string(),
+            filter_id: "new author".to_string(),
+            matched_feed: true,
+            optional: false,
+        });
+        let html = render_feed(&feed, &params);
+        assert_eq!(checked_authors(&html), ["ada lovelace", "new author"]);
+        assert!(!html.contains("Optional-only paper"));
+        assert!(html.contains("Untracked collection paper"));
+        assert_eq!(raw_feed_url(&params), "?rss");
+
+        let explicit_default = render_feed(
+            &feed,
+            &[(AUTHOR_MODE_PARAM.to_string(), "default".to_string())],
+        );
+        assert_eq!(
+            checked_authors(&explicit_default),
+            ["ada lovelace", "new author"]
+        );
+    }
+
+    #[test]
+    fn all_optional_defaults_keep_untracked_papers_even_after_form_submission() {
+        let mut feed = optional_author_feed();
+        for publication in &mut feed.publications {
+            for author in &mut publication.authors {
+                author.optional = true;
+            }
+        }
+        for params in [
+            vec![],
+            vec![(AUTHOR_MODE_PARAM.to_string(), "default".to_string())],
+        ] {
+            let html = render_feed(&feed, &params);
+            assert!(checked_authors(&html).is_empty());
+            assert!(html.contains("1 of 3 publications"));
+            assert!(html.contains("Untracked collection paper"));
+            assert!(!html.contains("Optional-only paper"));
+        }
+    }
+
+    #[test]
+    fn authors_without_optional_flags_are_all_checked_without_excluding_other_sources() {
+        let mut feed = optional_author_feed();
+        for publication in &mut feed.publications {
+            for author in &mut publication.authors {
+                author.optional = false;
+            }
+        }
+        let html = render_feed(&feed, &[]);
+        assert_eq!(checked_authors(&html), ["ada lovelace", "grace-hopper"]);
+        assert!(html.contains("3 publications"));
+        assert!(html.contains("Untracked collection paper"));
     }
 
     #[test]
@@ -737,7 +1232,7 @@ mod tests {
         ));
         assert!(!html.contains("Collection source"));
         assert!(html.contains("?view_author=ada+lovelace&amp;view_source=curated-source"));
-        assert!(html.contains(r#"<script src="/reader.js?v=5" defer></script>"#));
+        assert!(html.contains(r#"<script src="/reader.js?v=7" defer></script>"#));
         assert!(html.contains(
             r#"<label class="filter-checkbox filter-select-all" hidden><input type="checkbox" data-select-all><span>All tracked authors</span>"#
         ));

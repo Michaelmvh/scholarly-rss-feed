@@ -273,6 +273,8 @@ mod tests {
             published_doi: None,
             alternate_links: Vec::new(),
             matched_author_names: Vec::new(),
+            author_matches: Vec::new(),
+            openalex_author_matches: Vec::new(),
             discovery_sources: vec![DiscoverySource::curated_collection(
                 "example".to_string(),
                 "Example".to_string(),

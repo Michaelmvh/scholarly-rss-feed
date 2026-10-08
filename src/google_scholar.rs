@@ -4,7 +4,7 @@
 //! project's original HTML-scraping fallback while validating response status,
 //! challenge pages, and required result structure before data enters the cache.
 
-use crate::openalex::{Author, Authorship, Location, Source, Work};
+use crate::openalex::{Author, AuthorMatch, Authorship, Location, Source, Work};
 use scraper::{ElementRef, Html, Selector};
 
 const SCHOLAR_URL: &str = "https://scholar.google.com/scholar";
@@ -188,9 +188,16 @@ fn parse_result(result: ElementRef<'_>) -> Result<ScholarResult, String> {
 
 fn result_to_work(result: ScholarResult, queried_author: &str) -> Work {
     let author_names = split_authors(&result.authors);
-    let matched_author_names = best_author_match(&author_names, queried_author)
+    let matched_author_names: Vec<String> = best_author_match(&author_names, queried_author)
         .into_iter()
         .cloned()
+        .collect();
+    let author_matches = matched_author_names
+        .iter()
+        .map(|name| AuthorMatch {
+            queried_name: queried_author.to_string(),
+            matched_name: name.clone(),
+        })
         .collect();
     let authorships = author_names
         .into_iter()
@@ -243,6 +250,8 @@ fn result_to_work(result: ScholarResult, queried_author: &str) -> Work {
         published_doi: None,
         alternate_links: Vec::new(),
         matched_author_names,
+        author_matches,
+        openalex_author_matches: Vec::new(),
         discovery_sources: Vec::new(),
         curated_categories: Vec::new(),
     }
@@ -352,11 +361,238 @@ mod tests {
         assert_eq!(work.publication_date.as_deref(), Some("2025-01-01"));
         assert_eq!(work.author_names(), vec!["P Chatterjee", "A Lovelace"]);
         assert_eq!(work.matched_author_names, vec!["P Chatterjee"]);
+        assert_eq!(
+            work.author_matches,
+            vec![AuthorMatch {
+                queried_name: "Pranam Chatterjee".to_string(),
+                matched_name: "P Chatterjee".to_string(),
+            }]
+        );
         assert_eq!(work.abstract_text().as_deref(), Some("A useful abstract ."));
         assert_eq!(
             work.oa_pdf_url().as_deref(),
             Some("https://example.com/article.pdf")
         );
+    }
+
+    fn optional_person(name: &str, alias: Option<&str>) -> crate::config::PersonConfig {
+        crate::config::PersonConfig {
+            name: name.to_string(),
+            openalex_id: None,
+            google_scholar_name: alias.map(str::to_string),
+            optional: true,
+        }
+    }
+
+    #[test]
+    fn abbreviated_optional_authors_keep_their_configured_query_identity() {
+        for alias in [None, Some("Pranam K Chatterjee")] {
+            let person = optional_person("Pranam Chatterjee", alias);
+            let query = alias.unwrap_or(&person.name);
+            let results = parse_results(RESULT_HTML).unwrap();
+            let work = result_to_work(results.into_iter().next().unwrap(), query);
+            let publication = crate::work_to_publication(&work, &[person]);
+            assert!(publication.authors[0].matched_feed);
+            assert!(publication.authors[0].optional);
+            assert!(!publication.authors[1].matched_feed);
+            assert!(!publication.authors[1].optional);
+            let feed = crate::reader::Feed {
+                title: "Optional Scholar author".to_string(),
+                description: String::new(),
+                publications: vec![publication],
+                paper_sources: Vec::new(),
+            };
+            assert!(!crate::reader::render_feed(&feed, &[]).contains("An archived result"));
+            assert_eq!(
+                crate::work_to_item(&work).title(),
+                Some("An archived result")
+            );
+        }
+    }
+
+    #[test]
+    fn query_matches_survive_deduplication_and_replacement_by_a_richer_version() {
+        let results = parse_results(RESULT_HTML).unwrap();
+        let mut optional = result_to_work(results.into_iter().next().unwrap(), "Pranam Chatterjee");
+        optional.best_oa_location = None;
+        let results = parse_results(RESULT_HTML).unwrap();
+        let mut selected = result_to_work(results.into_iter().next().unwrap(), "Ada Lovelace");
+        let authorship = &mut selected.authorships.as_mut().unwrap()[0];
+        authorship.author.as_mut().unwrap().display_name = Some("Chatterjee, P.".to_string());
+        authorship.raw_author_name = Some("Chatterjee, P.".to_string());
+        let merged = crate::works::merge_works(vec![optional.clone()], vec![selected, optional]);
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].oa_pdf_url().is_some());
+        assert_eq!(merged[0].author_matches.len(), 2);
+        let serialized = serde_json::to_string(&merged[0]).unwrap();
+        let restored: Work = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(restored.author_matches, merged[0].author_matches);
+        let publication =
+            crate::work_to_publication(&restored, &[optional_person("Pranam Chatterjee", None)]);
+        assert!(publication.authors[0].matched_feed);
+        assert!(publication.authors[0].optional);
+        assert!(publication.authors[1].matched_feed);
+        assert!(!publication.authors[1].optional);
+    }
+
+    #[test]
+    fn optional_query_associations_do_not_match_a_different_initial() {
+        let html = RESULT_HTML.replace("P Chatterjee, A Lovelace", "D Baker, M Baker");
+        let results = parse_results(&html).unwrap();
+        let work = result_to_work(results.into_iter().next().unwrap(), "David Baker");
+        let publication =
+            crate::work_to_publication(&work, &[optional_person("David Baker", None)]);
+        assert!(publication.authors[0].matched_feed);
+        assert!(publication.authors[0].optional);
+        assert!(!publication.authors[1].matched_feed);
+        assert!(!publication.authors[1].optional);
+    }
+
+    #[test]
+    fn optional_query_identity_survives_merged_middle_initial_variants() {
+        for (original_name, richer_name, alias) in [
+            ("P Chatterjee", "P. K. Chatterjee", None),
+            ("P K Chatterjee", "P Chatterjee", None),
+            ("P Chatterjee", "Chatterjee, P. K.", None),
+            (
+                "P Chatterjee",
+                "P. K. Chatterjee",
+                Some("Pranam K Chatterjee"),
+            ),
+        ] {
+            for richer_first in [false, true] {
+                let html = RESULT_HTML.replace("P Chatterjee", original_name);
+                let mut original = result_to_work(
+                    parse_results(&html).unwrap().remove(0),
+                    alias.unwrap_or("Pranam Chatterjee"),
+                );
+                original.best_oa_location = None;
+                let richer: Work = serde_json::from_value(serde_json::json!({
+                    "id": "native:richer",
+                    "title": original.title,
+                    "authorships": [
+                        {"author": {"display_name": richer_name}, "raw_author_name": richer_name},
+                        {"author": {"display_name": "A Lovelace"}}
+                    ],
+                    "best_oa_location": {"pdf_url": "https://example.com/richer.pdf"}
+                }))
+                .unwrap();
+                let original_matches = original.author_matches.clone();
+                let mut merged = if richer_first {
+                    crate::works::merge_works(vec![richer], vec![original])
+                } else {
+                    crate::works::merge_works(vec![original], vec![richer])
+                };
+                assert_eq!(merged.len(), 1);
+                assert_eq!(merged[0].id.as_deref(), Some("native:richer"));
+                crate::works::mark_authors_by_name(&mut merged, &["Pranam Chatterjee".to_string()]);
+                let restored: Work =
+                    serde_json::from_str(&serde_json::to_string(&merged[0]).unwrap()).unwrap();
+                assert_eq!(restored.author_matches, original_matches);
+                let rss_before = crate::work_to_item(&restored);
+                let publication = crate::work_to_publication(
+                    &restored,
+                    &[optional_person("Pranam Chatterjee", alias)],
+                );
+                assert!(publication.authors[0].matched_feed);
+                assert!(publication.authors[0].optional);
+                assert!(!publication.authors[1].matched_feed);
+                let filter_id = publication.authors[0].filter_id.clone();
+                let feed = crate::reader::Feed {
+                    title: "Optional Scholar author".to_string(),
+                    description: String::new(),
+                    publications: vec![publication],
+                    paper_sources: Vec::new(),
+                };
+                assert!(!crate::reader::render_feed(&feed, &[]).contains("An archived result"));
+                assert!(crate::reader::render_feed(
+                    &feed,
+                    &[("view_author".to_string(), filter_id)],
+                )
+                .contains("An archived result"));
+                assert_eq!(crate::work_to_item(&restored), rss_before);
+                assert_eq!(restored.author_matches, original_matches);
+            }
+        }
+    }
+
+    #[test]
+    fn ambiguous_merged_associations_do_not_mark_either_author() {
+        let mut work = result_to_work(
+            parse_results(RESULT_HTML).unwrap().remove(0),
+            "Pranam Chatterjee",
+        );
+        work.authorships = serde_json::from_value(serde_json::json!([
+            {"author": {"display_name": "P K Chatterjee"}},
+            {"author": {"display_name": "P R Chatterjee"}}
+        ]))
+        .unwrap();
+        let publication =
+            crate::work_to_publication(&work, &[optional_person("Pranam Chatterjee", None)]);
+        assert!(publication
+            .authors
+            .iter()
+            .all(|author| !author.matched_feed && !author.optional));
+    }
+
+    #[test]
+    fn shared_scholar_authorship_is_optional_only_when_all_query_identities_are_optional() {
+        let html = RESULT_HTML.replace("P Chatterjee, A Lovelace", "P Smith");
+        for selected_status in [None, Some(false), Some(true)] {
+            for selected_first in [false, true] {
+                let optional =
+                    result_to_work(parse_results(&html).unwrap().remove(0), "Peter Smith");
+                let selected =
+                    result_to_work(parse_results(&html).unwrap().remove(0), "Paul Smith");
+                let mut people = vec![optional_person("Peter Smith", None)];
+                if let Some(optional) = selected_status {
+                    people.push(crate::config::PersonConfig {
+                        name: "Paul Smith".to_string(),
+                        openalex_id: None,
+                        google_scholar_name: None,
+                        optional,
+                    });
+                }
+                let merged = if selected_first {
+                    crate::works::merge_works(vec![selected], vec![optional])
+                } else {
+                    crate::works::merge_works(vec![optional], vec![selected])
+                };
+                let publication = crate::work_to_publication(&merged[0], &people);
+                assert_eq!(publication.authors.len(), 1);
+                assert!(publication.authors[0].matched_feed);
+                assert_eq!(
+                    publication.authors[0].optional,
+                    selected_status == Some(true)
+                );
+                let feed = crate::reader::Feed {
+                    title: "Shared query identity".to_string(),
+                    description: String::new(),
+                    publications: vec![publication],
+                    paper_sources: Vec::new(),
+                };
+                assert_eq!(
+                    crate::reader::render_feed(&feed, &[]).contains("An archived result"),
+                    selected_status != Some(true),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn abbreviated_optional_alias_does_not_override_another_matched_person() {
+        let html = RESULT_HTML.replace("P Chatterjee, A Lovelace", "D Baker, M Baker");
+        let optional = result_to_work(parse_results(&html).unwrap().remove(0), "D Baker");
+        let selected = result_to_work(parse_results(&html).unwrap().remove(0), "Mark Baker");
+        let merged = crate::works::merge_works(vec![optional], vec![selected]);
+        let publication = crate::work_to_publication(
+            &merged[0],
+            &[optional_person("David Baker", Some("D Baker"))],
+        );
+        assert!(publication.authors[0].matched_feed);
+        assert!(publication.authors[0].optional);
+        assert!(publication.authors[1].matched_feed);
+        assert!(!publication.authors[1].optional);
     }
 
     #[test]

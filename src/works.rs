@@ -1,4 +1,4 @@
-use crate::openalex::{normalize_id, Authorship, Work};
+use crate::openalex::{normalize_id, AuthorMatch, Authorship, OpenAlexAuthorMatch, Work};
 use std::collections::{HashMap, HashSet};
 
 /// A signature that identifies a work well enough to treat two records as versions of
@@ -191,12 +191,42 @@ pub(crate) fn mark_authors_by_name(works: &mut [Work], tracked_names: &[String])
     }
 }
 
+pub(crate) fn mark_feed_authors(works: &mut [Work], feed_author_ids: &[String]) {
+    for work in works {
+        let Some(authorships) = work.authorships.as_deref() else {
+            continue;
+        };
+        for authorship in authorships {
+            let Some(author) = authorship.author.as_ref() else {
+                continue;
+            };
+            let Some(author_id) = author.id.as_deref().map(normalize_id) else {
+                continue;
+            };
+            if !feed_author_ids.contains(&author_id) {
+                continue;
+            }
+            for name in author
+                .display_name
+                .iter()
+                .chain(authorship.raw_author_name.iter())
+            {
+                work.matched_author_names.push(name.clone());
+                work.openalex_author_matches.push(OpenAlexAuthorMatch {
+                    author_id: author_id.clone(),
+                    matched_name: name.clone(),
+                });
+            }
+        }
+        work.matched_author_names.sort();
+        work.matched_author_names.dedup();
+        work.openalex_author_matches.sort();
+        work.openalex_author_matches.dedup();
+    }
+}
+
 pub(crate) fn normalize_author_name(name: &str) -> String {
-    let tokens = name
-        .split(|character: char| !character.is_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .map(str::to_lowercase)
-        .collect::<Vec<_>>();
+    let tokens = author_name_tokens(name);
 
     let mut significant = tokens
         .iter()
@@ -210,6 +240,140 @@ pub(crate) fn normalize_author_name(name: &str) -> String {
     significant.sort();
     significant.dedup();
     significant.join(" ")
+}
+
+pub(crate) fn resolve_author_match(
+    authorships: &[Authorship],
+    matched: &AuthorMatch,
+) -> Option<usize> {
+    resolve_named_author_match(authorships, &matched.matched_name, &matched.queried_name)
+}
+
+pub(crate) fn resolve_openalex_author_match(
+    authorships: &[Authorship],
+    matched: &OpenAlexAuthorMatch,
+    tracked_ids: &HashSet<String>,
+    configured_name: Option<&str>,
+) -> Option<usize> {
+    let matched_id = normalize_id(&matched.author_id);
+    let mut exact_matches = authorships
+        .iter()
+        .enumerate()
+        .filter_map(|(index, authorship)| {
+            authorship
+                .author
+                .as_ref()
+                .and_then(|author| author.id.as_deref())
+                .is_some_and(|id| normalize_id(id) == matched_id)
+                .then_some(index)
+        });
+    if let Some(index) = exact_matches.next() {
+        return exact_matches.next().is_none().then_some(index);
+    }
+
+    let index = resolve_named_author_match(
+        authorships,
+        &matched.matched_name,
+        configured_name.unwrap_or(&matched.matched_name),
+    )?;
+    // A replacement ID may describe the same person, but not another tracked identity.
+    let conflicting_id = authorships[index]
+        .author
+        .as_ref()
+        .and_then(|author| author.id.as_deref())
+        .is_some_and(|id| tracked_ids.contains(&normalize_id(id)));
+    (!conflicting_id).then_some(index)
+}
+
+fn resolve_named_author_match(
+    authorships: &[Authorship],
+    matched_name: &str,
+    queried_name: &str,
+) -> Option<usize> {
+    let exact_name = normalize_author_name_with_initials(matched_name);
+    if exact_name.is_empty() {
+        return None;
+    }
+    let exact_name = exact_name.as_str();
+    let matching_authors = |exact: bool| {
+        authorships
+            .iter()
+            .enumerate()
+            .filter_map(move |(index, authorship)| {
+                authorship
+                    .author
+                    .as_ref()
+                    .and_then(|author| author.display_name.as_deref())
+                    .into_iter()
+                    .chain(authorship.raw_author_name.as_deref())
+                    .any(|name| {
+                        if exact {
+                            normalize_author_name_with_initials(name) == exact_name
+                        } else {
+                            // The original query can rule out a conflicting expanded name.
+                            compatible_author_names(name, matched_name)
+                                && compatible_author_names(name, queried_name)
+                        }
+                    })
+                    .then_some(index)
+            })
+    };
+    let mut exact_matches = matching_authors(true);
+    if let Some(index) = exact_matches.next() {
+        return exact_matches.next().is_none().then_some(index);
+    }
+    let mut compatible_matches = matching_authors(false);
+    let index = compatible_matches.next()?;
+    compatible_matches.next().is_none().then_some(index)
+}
+
+fn compatible_author_names(left: &str, right: &str) -> bool {
+    let Some((left_surname, left_given)) = author_name_parts(left) else {
+        return false;
+    };
+    let Some((right_surname, right_given)) = author_name_parts(right) else {
+        return false;
+    };
+    left_surname == right_surname
+        && left_given.iter().zip(&right_given).all(|(left, right)| {
+            left == right
+                || ((left.chars().count() == 1 || right.chars().count() == 1)
+                    && left.chars().next() == right.chars().next())
+        })
+}
+
+fn author_name_parts(name: &str) -> Option<(Vec<String>, Vec<String>)> {
+    let (surname, given) = if let Some((surname, given)) = name.split_once(',') {
+        if given.contains(',') {
+            return None;
+        }
+        (author_name_tokens(surname), author_name_tokens(given))
+    } else {
+        let mut given = author_name_tokens(name);
+        let surname = given.pop()?;
+        (vec![surname], given)
+    };
+    (!surname.is_empty() && !given.is_empty()).then_some((surname, given))
+}
+
+fn normalize_author_name_with_initials(name: &str) -> String {
+    let tokens = if name.contains(',') {
+        let Some((surname, mut given)) = author_name_parts(name) else {
+            return String::new();
+        };
+        given.extend(surname);
+        given
+    } else {
+        author_name_tokens(name)
+    };
+    tokens.join(" ")
+}
+
+fn author_name_tokens(name: &str) -> Vec<String> {
+    name.split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_lowercase)
+        .collect()
 }
 
 fn normalize_doi(doi: &str) -> String {
@@ -270,6 +434,14 @@ fn merge_work_version(existing: &mut Work, mut candidate: Work) {
     matched_author_names.append(&mut candidate.matched_author_names);
     matched_author_names.sort();
     matched_author_names.dedup();
+    let mut author_matches = std::mem::take(&mut existing.author_matches);
+    author_matches.append(&mut candidate.author_matches);
+    author_matches.sort();
+    author_matches.dedup();
+    let mut openalex_author_matches = std::mem::take(&mut existing.openalex_author_matches);
+    openalex_author_matches.append(&mut candidate.openalex_author_matches);
+    openalex_author_matches.sort();
+    openalex_author_matches.dedup();
     let mut discovery_sources = std::mem::take(&mut existing.discovery_sources);
     discovery_sources.append(&mut candidate.discovery_sources);
     discovery_sources.sort();
@@ -299,6 +471,8 @@ fn merge_work_version(existing: &mut Work, mut candidate: Work) {
     existing.full_text_url = full_text_url;
     existing.published_doi = published_doi;
     existing.matched_author_names = matched_author_names;
+    existing.author_matches = author_matches;
+    existing.openalex_author_matches = openalex_author_matches;
     existing.discovery_sources = discovery_sources;
     existing.curated_categories = curated_categories;
 }
@@ -354,9 +528,206 @@ mod tests {
             published_doi: None,
             alternate_links: Vec::new(),
             matched_author_names: Vec::new(),
+            author_matches: Vec::new(),
+            openalex_author_matches: Vec::new(),
             discovery_sources: Vec::new(),
             curated_categories: Vec::new(),
         }
+    }
+
+    #[test]
+    fn resolves_author_associations_conservatively() {
+        let cases: &[(&str, &str, &[&str], Option<usize>)] = &[
+            (
+                "P Chatterjee",
+                "Pranam Chatterjee",
+                &["P. K. Chatterjee"],
+                Some(0),
+            ),
+            (
+                "P K Chatterjee",
+                "Pranam Chatterjee",
+                &["P Chatterjee"],
+                Some(0),
+            ),
+            (
+                "P Chatterjee",
+                "Pranam Chatterjee",
+                &["Chatterjee, P. K."],
+                Some(0),
+            ),
+            (
+                "Chatterjee, P.",
+                "Pranam Chatterjee",
+                &["P. K. Chatterjee"],
+                Some(0),
+            ),
+            (
+                "P Chatterjee",
+                "Pranam Chatterjee",
+                &["Pranam K Chatterjee"],
+                Some(0),
+            ),
+            ("D Baker", "David Baker", &["M Baker"], None),
+            (
+                "P K Chatterjee",
+                "Pranam Chatterjee",
+                &["P R Chatterjee"],
+                None,
+            ),
+            (
+                "Pranam Chatterjee",
+                "Pranam Chatterjee",
+                &["Paul Chatterjee"],
+                None,
+            ),
+            (
+                "P Chatterjee",
+                "Pranam Chatterjee",
+                &["Paul Chatterjee"],
+                None,
+            ),
+            (
+                "P Chatterjee",
+                "Pranam K Chatterjee",
+                &["P R Chatterjee"],
+                None,
+            ),
+            (
+                "P Kumar Chatterjee",
+                "Pranam Chatterjee",
+                &["P Kiran Chatterjee"],
+                None,
+            ),
+            ("P Chatterjee", "Pranam Chatterjee", &["P K Smith"], None),
+            ("P Chatterjee", "Pranam Chatterjee", &["Chatterjee"], None),
+            ("", "Pranam Chatterjee", &[""], None),
+            (
+                "P Chatterjee",
+                "Pranam Chatterjee",
+                &["P K Chatterjee", "P R Chatterjee"],
+                None,
+            ),
+            (
+                "P Chatterjee",
+                "Pranam Chatterjee",
+                &["P K Chatterjee", "Chatterjee, P."],
+                Some(1),
+            ),
+            (
+                "P Chatterjee",
+                "Pranam Chatterjee",
+                &["P Chatterjee", "Chatterjee, P.", "P K Chatterjee"],
+                None,
+            ),
+        ];
+        for (matched_name, queried_name, names, expected) in cases {
+            let work = work_with_authors(names);
+            let matched = AuthorMatch {
+                matched_name: (*matched_name).to_string(),
+                queried_name: (*queried_name).to_string(),
+            };
+            assert_eq!(
+                resolve_author_match(work.authorships.as_deref().unwrap(), &matched),
+                *expected,
+                "{matched_name:?} / {queried_name:?} against {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn identity_exact_names_preserve_given_name_order() {
+        for (original, actual, expected) in [
+            ("J A Smith", "A J Smith", None),
+            ("J A Smith", "Smith, A J", None),
+            ("John Alan Smith", "Alan John Smith", None),
+            ("John Alan Smith", "Smith, Alan John", None),
+            ("J A Smith", "Smith, J. A.", Some(0)),
+            ("John Alan Smith", "Smith, John Alan", Some(0)),
+            ("Ludwig van Beethoven", "van Beethoven, Ludwig", Some(0)),
+        ] {
+            let work = work_with_authors(&[actual]);
+            let matched = AuthorMatch {
+                queried_name: original.to_string(),
+                matched_name: original.to_string(),
+            };
+            assert_eq!(
+                resolve_author_match(work.authorships.as_deref().unwrap(), &matched),
+                expected,
+                "{original} -> {actual}",
+            );
+        }
+        let work = work_with_authors(&["J J Smith", "J Smith"]);
+        let matched = AuthorMatch {
+            queried_name: "John Smith".to_string(),
+            matched_name: "J Smith".to_string(),
+        };
+        assert_eq!(
+            resolve_author_match(work.authorships.as_deref().unwrap(), &matched),
+            Some(1),
+        );
+    }
+
+    #[test]
+    fn openalex_identity_resolution_prefers_ids_and_blocks_conflicting_tracked_ids() {
+        let work: Work = serde_json::from_value(serde_json::json!({
+            "authorships": [
+                {"author": {"id": "https://openalex.org/A1", "display_name": "Provider spelling"}},
+                {"author": {"id": "A2", "display_name": "John A Smith"}}
+            ]
+        }))
+        .unwrap();
+        let tracked = HashSet::from(["A1".to_string(), "A2".to_string()]);
+        let matched = OpenAlexAuthorMatch {
+            author_id: "A1".to_string(),
+            matched_name: "John A Smith".to_string(),
+        };
+        let authorships = work.authorships.unwrap();
+        assert_eq!(
+            resolve_openalex_author_match(&authorships, &matched, &tracked, Some("John A Smith")),
+            Some(0),
+        );
+        assert_eq!(
+            resolve_openalex_author_match(
+                &authorships[1..],
+                &matched,
+                &tracked,
+                Some("John A Smith")
+            ),
+            None,
+        );
+        assert_eq!(
+            resolve_openalex_author_match(
+                &authorships[1..],
+                &matched,
+                &HashSet::from(["A1".to_string()]),
+                Some("John A Smith"),
+            ),
+            Some(0),
+        );
+    }
+
+    #[test]
+    fn resolves_raw_names_and_counts_authorships_not_spellings() {
+        let mut work = work_with_authors(&["Unrelated Display", "M Baker"]);
+        work.authorships.as_mut().unwrap()[0].raw_author_name = Some("Baker, D. W.".to_string());
+        let matched = AuthorMatch {
+            queried_name: "David Baker".to_string(),
+            matched_name: "D Baker".to_string(),
+        };
+        assert_eq!(
+            resolve_author_match(work.authorships.as_deref().unwrap(), &matched),
+            Some(0)
+        );
+        work.authorships.as_mut().unwrap()[0]
+            .author
+            .as_mut()
+            .unwrap()
+            .display_name = Some("D W Baker".to_string());
+        assert_eq!(
+            resolve_author_match(work.authorships.as_deref().unwrap(), &matched),
+            Some(0)
+        );
     }
 
     #[test]

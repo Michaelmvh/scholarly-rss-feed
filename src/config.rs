@@ -62,7 +62,7 @@ pub struct FeedConfig {
     pub from: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Hash, Eq, PartialEq)]
 pub struct PersonConfig {
     /// Canonical human-readable name.
     pub name: String,
@@ -70,6 +70,9 @@ pub struct PersonConfig {
     pub openalex_id: Option<String>,
     /// Optional Google Scholar query spelling; defaults to `name`.
     pub google_scholar_name: Option<String>,
+    /// Include in RSS, but leave unselected in the reader by default.
+    #[serde(default)]
+    pub optional: bool,
 }
 
 impl Config {
@@ -118,5 +121,31 @@ mod tests {
         std::fs::remove_file(path).unwrap();
 
         assert!(error.contains("Failed to parse config"));
+    }
+
+    #[test]
+    fn people_are_selected_by_default_unless_optional() {
+        let config: Config = toml::from_str(
+            r#"
+[[feeds.example.people]]
+name = "Ada Lovelace"
+[[feeds.example.people]]
+name = "Grace Hopper"
+optional = true
+[[feeds.example.people]]
+name = "Alan Turing"
+optional = false
+"#,
+        )
+        .unwrap();
+
+        let people = &config.feeds["example"].people;
+        assert!(!people[0].optional);
+        assert!(people[1].optional);
+        assert!(!people[2].optional);
+        assert!(toml::from_str::<Config>(
+            "[[feeds.example.people]]\nname = 'Ada'\noptional = 'yes'"
+        )
+        .is_err());
     }
 }

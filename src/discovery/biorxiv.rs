@@ -270,6 +270,8 @@ fn convert_work(configured_category: &str, work: ApiWork) -> Result<Work, String
         published_doi,
         alternate_links,
         matched_author_names: Vec::new(),
+        author_matches: Vec::new(),
+        openalex_author_matches: Vec::new(),
         discovery_sources: vec![DiscoverySource::biorxiv_category(
             configured_category,
             category_label,

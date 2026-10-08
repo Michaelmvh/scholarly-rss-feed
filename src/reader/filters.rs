@@ -1,9 +1,13 @@
 use super::{Feed, Publication};
 use chrono::{Duration, NaiveDate};
-use std::collections::BTreeMap;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) const PERIOD_PARAM: &str = "view_period";
 pub(crate) const AUTHOR_PARAM: &str = "view_author";
+pub(super) const AUTHOR_MODE_PARAM: &str = "view_authors";
+pub(super) const AUTHOR_SELECTION_PARAM: &str = "view_author_selection";
+pub(super) const AUTHOR_OPTIONS_PARAM: &str = "view_author_options";
 pub(super) const SOURCE_PARAM: &str = "view_source";
 pub(super) const EXCLUDE_CURATED_ONLY: &str = "exclude-curated-only";
 
@@ -36,31 +40,63 @@ impl Period {
 pub(super) struct ViewFilters {
     pub period: Option<Period>,
     pub authors: Vec<String>,
+    pub author_selection: AuthorSelection,
     pub source: Option<String>,
 }
 
-impl ViewFilters {
-    pub(super) fn from_params(params: &[(String, String)]) -> Self {
-        Self {
-            period: value(params, PERIOD_PARAM).and_then(parse_period),
-            authors: values(params, AUTHOR_PARAM),
-            source: nonempty_value(params, SOURCE_PARAM),
-        }
-    }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum AuthorSelection {
+    #[default]
+    Default,
+    All,
+    Custom,
+}
 
-    pub(super) fn validated(mut self, options: &FilterOptions) -> Self {
-        self.authors
-            .retain(|author| options.authors.contains_key(author));
-        if self.source.as_ref().is_some_and(|source| {
+impl ViewFilters {
+    pub(super) fn from_params(params: &[(String, String)], options: &FilterOptions) -> Self {
+        let authors = values(params, AUTHOR_PARAM);
+        let had_authors = !authors.is_empty();
+        // Compare the submitted checkboxes with the form's original selection, not
+        // current options: switching paper sources can change the available authors.
+        let selection_fingerprint = author_selection_fingerprint(&authors);
+        let unchanged_selection = value(params, AUTHOR_SELECTION_PARAM)
+            .is_none_or(|fingerprint| selection_fingerprint == fingerprint);
+        let selected_all = !unchanged_selection
+            && had_authors
+            && value(params, AUTHOR_OPTIONS_PARAM)
+                .is_some_and(|fingerprint| selection_fingerprint == fingerprint);
+        let authors = authors
+            .into_iter()
+            .filter(|author| options.authors.contains_key(author))
+            .collect::<Vec<_>>();
+        let author_selection = match value(params, AUTHOR_MODE_PARAM) {
+            Some("all") if unchanged_selection => AuthorSelection::All,
+            Some("default") if unchanged_selection => AuthorSelection::Default,
+            Some("custom" | "default" | "all") if selected_all => AuthorSelection::All,
+            Some("default" | "custom" | "all") => AuthorSelection::Custom,
+            _ if had_authors && authors.is_empty() => AuthorSelection::Default,
+            _ if !authors.is_empty() => AuthorSelection::Custom,
+            _ => AuthorSelection::Default,
+        };
+        let mut filters = Self {
+            period: value(params, PERIOD_PARAM).and_then(parse_period),
+            authors,
+            author_selection,
+            source: nonempty_value(params, SOURCE_PARAM),
+        };
+        if filters.author_selection != AuthorSelection::Custom {
+            filters.authors.clear();
+        }
+        if filters.source.as_ref().is_some_and(|source| {
             if source == EXCLUDE_CURATED_ONLY {
                 !options.can_exclude_collection_only
             } else {
                 !options.sources.contains_key(source)
             }
         }) {
-            self.source = None;
+            filters.source = None;
         }
-        self
+        filters
     }
 
     pub(super) fn matches_on(&self, publication: &Publication, today: NaiveDate) -> bool {
@@ -71,13 +107,22 @@ impl ViewFilters {
                 .and_then(parse_date)
                 .is_some_and(|date| date >= today - Duration::days(period.days()))
         });
-        let author_matches = self.authors.is_empty()
-            || self.authors.iter().any(|selected| {
+        let author_matches = match self.author_selection {
+            AuthorSelection::Default => {
+                !publication.authors.iter().any(|author| author.matched_feed)
+                    || publication
+                        .authors
+                        .iter()
+                        .any(|author| author.matched_feed && !author.optional)
+            }
+            AuthorSelection::All => true,
+            AuthorSelection::Custom => self.authors.iter().any(|selected| {
                 publication
                     .authors
                     .iter()
                     .any(|author| author.matched_feed && &author.filter_id == selected)
-            });
+            }),
+        };
         let source_matches = self.source.as_ref().is_none_or(|selected| {
             if selected == EXCLUDE_CURATED_ONLY {
                 publication
@@ -99,16 +144,31 @@ impl ViewFilters {
 #[derive(Clone, Debug, Default)]
 pub(super) struct FilterOptions {
     pub authors: BTreeMap<String, String>,
+    pub optional_authors: BTreeSet<String>,
     pub sources: BTreeMap<String, String>,
     pub can_exclude_collection_only: bool,
 }
 
 impl FilterOptions {
+    pub(super) fn default_authors(&self) -> Vec<String> {
+        self.authors
+            .keys()
+            .filter(|id| !self.optional_authors.contains(*id))
+            .cloned()
+            .collect()
+    }
+
     pub(super) fn from_feed(feed: &Feed) -> Self {
         let mut options = Self::default();
+        let mut non_optional_authors = BTreeSet::new();
         for publication in &feed.publications {
             for author in &publication.authors {
                 if author.matched_feed && !author.filter_id.is_empty() {
+                    if author.optional {
+                        options.optional_authors.insert(author.filter_id.clone());
+                    } else {
+                        non_optional_authors.insert(author.filter_id.clone());
+                    }
                     options
                         .authors
                         .entry(author.filter_id.clone())
@@ -128,6 +188,9 @@ impl FilterOptions {
                 }
             }
         }
+        options
+            .optional_authors
+            .retain(|id| !non_optional_authors.contains(id));
         options.can_exclude_collection_only = feed.publications.iter().any(|publication| {
             publication
                 .discovery_sources
@@ -144,7 +207,21 @@ impl FilterOptions {
 }
 
 pub(super) fn is_view_param(name: &str) -> bool {
-    matches!(name, PERIOD_PARAM | AUTHOR_PARAM | SOURCE_PARAM)
+    matches!(
+        name,
+        PERIOD_PARAM
+            | AUTHOR_PARAM
+            | AUTHOR_MODE_PARAM
+            | AUTHOR_SELECTION_PARAM
+            | AUTHOR_OPTIONS_PARAM
+            | SOURCE_PARAM
+    )
+}
+
+pub(super) fn author_selection_fingerprint(authors: &[String]) -> String {
+    let authors = authors.iter().collect::<BTreeSet<_>>();
+    let serialized = serde_json::to_vec(&authors).expect("author IDs serialize as JSON");
+    format!("{:x}", Sha256::digest(serialized))
 }
 
 fn value<'a>(params: &'a [(String, String)], name: &str) -> Option<&'a str> {
@@ -193,6 +270,21 @@ mod tests {
     use crate::provenance::DiscoverySource;
     use crate::reader::{Author, Publication};
 
+    #[test]
+    fn selection_fingerprints_are_bounded_and_order_independent() {
+        let fingerprint = author_selection_fingerprint(&["a".to_string(), "bc".to_string()]);
+        assert_eq!(fingerprint.len(), 64);
+        assert_eq!(
+            fingerprint,
+            author_selection_fingerprint(&["bc".to_string(), "a".to_string(), "a".to_string(),])
+        );
+        assert_ne!(
+            fingerprint,
+            author_selection_fingerprint(&["ab".to_string(), "c".to_string()])
+        );
+        assert_eq!(author_selection_fingerprint(&[]).len(), 64);
+    }
+
     fn publication(date: Option<&str>) -> Publication {
         Publication {
             id: None,
@@ -206,6 +298,7 @@ mod tests {
                 name: "Ada Lovelace".to_string(),
                 filter_id: "ada-lovelace".to_string(),
                 matched_feed: true,
+                optional: false,
             }],
             abstract_text: None,
             discovery_sources: vec![DiscoverySource::openalex()],
@@ -230,7 +323,10 @@ mod tests {
     fn malformed_period_is_ignored() {
         let params = vec![(PERIOD_PARAM.to_string(), "recent-ish".to_string())];
 
-        assert_eq!(ViewFilters::from_params(&params), ViewFilters::default());
+        assert_eq!(
+            ViewFilters::from_params(&params, &FilterOptions::default()),
+            ViewFilters::default()
+        );
     }
 
     #[test]
@@ -242,7 +338,17 @@ mod tests {
         ];
 
         assert_eq!(
-            ViewFilters::from_params(&params).authors,
+            ViewFilters::from_params(
+                &params,
+                &FilterOptions {
+                    authors: BTreeMap::from([
+                        ("ada lovelace".to_string(), "Ada Lovelace".to_string()),
+                        ("grace hopper".to_string(), "Grace Hopper".to_string()),
+                    ]),
+                    ..FilterOptions::default()
+                }
+            )
+            .authors,
             vec!["ada lovelace", "grace hopper"]
         );
     }

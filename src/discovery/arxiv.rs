@@ -410,6 +410,8 @@ fn build_work<'a>(
             .map(|doi| vec![format!("https://doi.org/{doi}")])
             .unwrap_or_default(),
         matched_author_names: Vec::new(),
+        author_matches: Vec::new(),
+        openalex_author_matches: Vec::new(),
         discovery_sources: configured
             .iter()
             .filter(|configured| categories.contains(configured))

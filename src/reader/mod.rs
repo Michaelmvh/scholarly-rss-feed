@@ -44,6 +44,7 @@ pub struct Author {
     pub name: String,
     pub filter_id: String,
     pub matched_feed: bool,
+    pub optional: bool,
 }
 
 #[derive(Clone, Debug)]

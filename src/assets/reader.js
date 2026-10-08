@@ -14,11 +14,21 @@
 
   pickers.forEach((picker) => {
     const selectAll = picker.querySelector("[data-select-all]");
+    const authorMode = picker.querySelector('input[name="view_authors"]');
+    const authorSelection = picker.querySelector('input[name="view_author_selection"]');
     const checkboxes = [
       ...picker.querySelectorAll('input[type="checkbox"][name]'),
     ];
     const summary = picker.querySelector("[data-selection-summary]");
     let dirty = false;
+
+    const updateAuthorMode = () => {
+      if (!authorMode) return;
+      authorMode.value = checkboxes.every((checkbox) => checkbox.checked)
+        ? "all"
+        : "custom";
+      if (authorSelection) authorSelection.disabled = true;
+    };
 
     if (selectAll) {
       selectAll.closest(".filter-select-all").hidden = false;
@@ -27,14 +37,17 @@
     const updateSummary = () => {
       const selected = checkboxes.filter((checkbox) => checkbox.checked);
       if (selectAll) {
-        selectAll.checked = selected.length === 0;
+        selectAll.checked = selected.length === checkboxes.length;
+        selectAll.indeterminate = selected.length > 0 && !selectAll.checked;
       }
       summary.textContent =
-        selected.length === 0
-          ? summary.dataset.emptyLabel || "Any tracked author"
-          : selected.length === 1
-            ? selected[0].dataset.label
-            : `${selected.length} selected`;
+        selectAll?.checked
+          ? "All tracked authors"
+          : selected.length === 0
+            ? summary.dataset.emptyLabel || "No tracked authors"
+            : selected.length === 1
+              ? selected[0].dataset.label
+              : `${selected.length} selected`;
     };
 
     checkboxes.forEach((checkbox) => {
@@ -44,23 +57,23 @@
           return;
         }
         dirty = true;
+        updateAuthorMode();
         updateSummary();
       });
     });
 
     if (selectAll) {
       selectAll.addEventListener("change", () => {
-        if (selectAll.checked) {
-          checkboxes.forEach((checkbox) => {
-            checkbox.checked = false;
-          });
-          dirty = true;
-          updateSummary();
-        } else if (!checkboxes.some((checkbox) => checkbox.checked)) {
-          selectAll.checked = true;
-        }
+        checkboxes.forEach((checkbox) => {
+          checkbox.checked = selectAll.checked;
+        });
+        dirty = true;
+        updateAuthorMode();
+        updateSummary();
       });
     }
+
+    updateSummary();
 
     picker.addEventListener("toggle", () => {
       if (!picker.open && dirty) form.requestSubmit();

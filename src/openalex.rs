@@ -58,9 +58,25 @@ pub struct Work {
     #[serde(default)]
     pub matched_author_names: Vec<String>,
     #[serde(default)]
+    pub author_matches: Vec<AuthorMatch>,
+    #[serde(default)]
+    pub openalex_author_matches: Vec<OpenAlexAuthorMatch>,
+    #[serde(default)]
     pub discovery_sources: Vec<DiscoverySource>,
     #[serde(default)]
     pub curated_categories: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AuthorMatch {
+    pub queried_name: String,
+    pub matched_name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct OpenAlexAuthorMatch {
+    pub author_id: String,
+    pub matched_name: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
