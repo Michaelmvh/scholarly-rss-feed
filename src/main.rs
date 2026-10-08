@@ -71,6 +71,7 @@ const MAX_CONCURRENT_FEED_BUILDS: usize = 8;
 const MAX_GENERATED_FEEDS: usize = 128;
 const MAX_QUERY_LENGTH: usize = 8 * 1024;
 const MAX_QUERY_PARAMS: usize = 100;
+const MAX_READER_AUTHOR_PARAMS: usize = 256;
 const MAX_DYNAMIC_FILTER_VALUES: usize = 25;
 const MAX_QUERY_VALUE_LENGTH: usize = 256;
 const MAX_REQUESTS_PER_MINUTE: usize = 60;
@@ -640,9 +641,18 @@ fn validate_dynamic_request(query: &str, params: &[(String, String)]) -> Result<
             "Query string exceeds the {MAX_QUERY_LENGTH}-byte limit."
         ));
     }
-    if params.len() > MAX_QUERY_PARAMS {
+    let reader_author_count = params
+        .iter()
+        .filter(|(name, _)| name == reader::AUTHOR_PARAM)
+        .count();
+    if reader_author_count > MAX_READER_AUTHOR_PARAMS {
         return Err(format!(
-            "Query contains more than {MAX_QUERY_PARAMS} parameters."
+            "Query contains more than {MAX_READER_AUTHOR_PARAMS} reader author parameters."
+        ));
+    }
+    if params.len() - reader_author_count > MAX_QUERY_PARAMS {
+        return Err(format!(
+            "Query contains more than {MAX_QUERY_PARAMS} non-author parameters."
         ));
     }
     if params
@@ -2389,6 +2399,44 @@ mod tests {
         assert_eq!(cache.len(), 2);
         assert!(!cache.contains_key(&oldest_key));
         assert!(cache.contains_key(&newest_key));
+    }
+
+    #[test]
+    fn reader_author_parameters_have_separate_bounded_limits() {
+        let mut params = (0..MAX_READER_AUTHOR_PARAMS)
+            .map(|index| (reader::AUTHOR_PARAM.to_string(), index.to_string()))
+            .collect::<Vec<_>>();
+        params.extend((0..MAX_QUERY_PARAMS).map(|_| ("x".to_string(), "y".to_string())));
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(&params)
+            .finish();
+        assert!(validate_dynamic_request(&query, &params).is_ok());
+        params.push((reader::AUTHOR_PARAM.to_string(), "extra".to_string()));
+        assert!(validate_dynamic_request(&query, &params)
+            .unwrap_err()
+            .contains("reader author parameters"));
+        params.pop();
+        params.push(("x".to_string(), "y".to_string()));
+        assert!(validate_dynamic_request(&query, &params)
+            .unwrap_err()
+            .contains("non-author parameters"));
+
+        let params = (0..MAX_READER_AUTHOR_PARAMS)
+            .map(|_| (reader::AUTHOR_PARAM.to_string(), "a".repeat(32)))
+            .collect::<Vec<_>>();
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(&params)
+            .finish();
+        assert!(validate_dynamic_request(&query, &params)
+            .unwrap_err()
+            .contains("Query string exceeds"));
+        let oversized = vec![(
+            reader::AUTHOR_PARAM.to_string(),
+            "a".repeat(MAX_QUERY_VALUE_LENGTH + 1),
+        )];
+        assert!(validate_dynamic_request("", &oversized)
+            .unwrap_err()
+            .contains("may not exceed"));
     }
 
     #[test]

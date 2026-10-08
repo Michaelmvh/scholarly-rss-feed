@@ -3,6 +3,7 @@ mod render;
 
 use crate::provenance::DiscoverySource;
 
+pub(crate) use filters::AUTHOR_PARAM;
 pub use render::{
     article_id_from_path, render_article, render_feed, FAVICON, READER_CSS, READER_JS,
 };

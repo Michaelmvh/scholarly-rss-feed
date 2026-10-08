@@ -562,8 +562,10 @@ Use stable OpenAlex IDs in `feeds.toml` and give TRMNL a named feed URL such as
 `https://reading.michaelmvh.com/?feed=myfield&rss`. Name, ORCID, ISSN, and journal-name parameters
 must be resolved before the channel-cache lookup and can therefore cause extra OpenAlex calls.
 
-Dynamic requests are limited to an 8 KiB query string, 100 parameters, 25 provider/source filter
-values, and 256 bytes per value. Dynamic feed and reader routes also allow 60 requests per client
+Dynamic requests are limited to an 8 KiB query string, 100 parameters other than `view_author`,
+256 repeated `view_author` parameters, 25 provider/source filter values, and 256 bytes per value.
+The total query-size limit still applies to large author selections.
+Dynamic feed and reader routes also allow 60 requests per client
 IP per minute. `GSRF_TRUST_PROXY_CLIENT_IP=true` enables the Cloudflare connecting-IP header for
 this limit and is set only in the tunnel deployment; do not enable it when clients can connect
 directly. Inbound headers have a 10-second deadline, HTTP keep-alive is disabled, and excess cold

@@ -3,7 +3,7 @@ use chrono::{Duration, NaiveDate};
 use std::collections::BTreeMap;
 
 pub(super) const PERIOD_PARAM: &str = "view_period";
-pub(super) const AUTHOR_PARAM: &str = "view_author";
+pub(crate) const AUTHOR_PARAM: &str = "view_author";
 pub(super) const SOURCE_PARAM: &str = "view_source";
 pub(super) const EXCLUDE_CURATED_ONLY: &str = "exclude-curated-only";
 
